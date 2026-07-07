@@ -1,0 +1,21 @@
+# Xcode
+*.xcconfig
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+SourcePackages/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
