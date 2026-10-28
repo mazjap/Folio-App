@@ -14,7 +14,7 @@ struct ProjectUpdate: Encodable {
     var links: [String: String]?
     var media: [MediaItem]?
     var createdAt: Date?
-
+    
     func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(title, forKey: .title)
@@ -29,7 +29,7 @@ struct ProjectUpdate: Encodable {
         try c.encodeIfPresent(media, forKey: .media)
         try c.encodeIfPresent(createdAt, forKey: .createdAt)
     }
-
+    
     enum CodingKeys: String, CodingKey {
         case title, tagline, description, heroImage, category, status, featured, techStack, links, media, createdAt
     }
@@ -52,38 +52,38 @@ struct ProjectRepository: ProjectRepositoryProtocol {
     private func processor() throws(APIError) -> URLProcessor {
         try .fromSettings()
     }
-
+    
     private func projectsURL(_ p: URLProcessor) -> URL {
         p.baseURL.appending(path: "api").appending(path: "projects")
     }
-
+    
     func fetchProjects() async throws(APIError) -> [ProjectPreview] {
         let p = try processor()
         let data = try await p.get(projectsURL(p))
         return try p.decode([ProjectPreview].self, from: data)
     }
-
+    
     func fetchProjectNavs() async throws(APIError) -> [ProjectNav] {
         let p = try processor()
         let url = projectsURL(p).appending(path: "nav")
         let data = try await p.get(url)
         return try p.decode([ProjectNav].self, from: data)
     }
-
+    
     func fetchProject(withId id: String) async throws(APIError) -> ProjectDetail {
         let p = try processor()
         let url = projectsURL(p).appending(path: id)
         let data = try await p.get(url)
         return try p.decode(ProjectDetail.self, from: data)
     }
-
+    
     func createProject(_ project: ProjectDetail) async throws(APIError) -> ProjectDetail {
         let p = try processor()
         let body = try p.encode(project)
         let data = try await p.post(projectsURL(p), body: body)
         return try p.decode(ProjectDetail.self, from: data)
     }
-
+    
     func updateProject(id: String, fields: ProjectUpdate) async throws(APIError) -> ProjectDetail {
         let p = try processor()
         let url = projectsURL(p).appending(path: id)
@@ -91,7 +91,7 @@ struct ProjectRepository: ProjectRepositoryProtocol {
         let data = try await p.put(url, body: body)
         return try p.decode(ProjectDetail.self, from: data)
     }
-
+    
     func deleteProject(id: String) async throws(APIError) {
         let p = try processor()
         try await p.delete(projectsURL(p).appending(path: id))

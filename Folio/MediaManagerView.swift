@@ -6,14 +6,14 @@ struct MediaManagerView: View {
     @Binding var media: [MediaItem]
     let context: MediaContext
     let id: String
-
+    
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var isUploading = false
     @State private var uploadError: String?
-
-
+    
+    
     private let repo = MediaRepository()
-
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if media.isEmpty {
@@ -39,7 +39,7 @@ struct MediaManagerView: View {
                     }
                 }
             }
-
+            
             HStack(spacing: 8) {
                 PhotosPicker(
                     selection: $pickerItems,
@@ -52,7 +52,7 @@ struct MediaManagerView: View {
                     guard !items.isEmpty else { return }
                     Task { await uploadPhotoItems(items) }
                 }
-
+                
                 #if os(macOS)
                 Button("Add from Files", systemImage: "folder") {
                     let panel = NSOpenPanel()
@@ -62,13 +62,13 @@ struct MediaManagerView: View {
                     Task { await uploadFileURLs(panel.urls) }
                 }
                 #endif
-
+                
                 if isUploading {
                     ProgressView()
                 }
             }
             .buttonStyle(.bordered)
-
+            
             if let err = uploadError {
                 Label(err, systemImage: "exclamationmark.triangle")
                     .font(.caption)
@@ -82,9 +82,9 @@ struct MediaManagerView: View {
         }
         #endif
     }
-
+    
     // MARK: - Upload helpers
-
+    
     private func uploadPhotoItems(_ items: [PhotosPickerItem]) async {
         isUploading = true
         defer {
@@ -101,7 +101,7 @@ struct MediaManagerView: View {
             await uploadData(data, fileName: fileName, mimeType: mimeType, mediaType: mediaType)
         }
     }
-
+    
     #if os(macOS)
     private func uploadFileURLs(_ urls: [URL]) async {
         isUploading = true
@@ -117,7 +117,7 @@ struct MediaManagerView: View {
         }
     }
     #endif
-
+    
     private func uploadData(_ data: Data, fileName: String, mimeType: String, mediaType: MediaType) async {
         do {
             let url = try await repo.upload(fileData: data, fileName: fileName, mimeType: mimeType, context: context, id: id)
@@ -134,15 +134,15 @@ struct MediaManagerView: View {
 private struct MediaItemRow: View {
     @Binding var item: MediaItem
     var onRemove: () -> Void
-
+    
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: "line.3.horizontal")
                 .foregroundStyle(.tertiary)
                 .frame(width: 16)
-
+            
             AsyncImage(url: mediaURL(for: item.url)) { phase in
-                if case .success(let image) = phase {
+                if case let .success(image) = phase {
                     image.resizable().aspectRatio(contentMode: .fill)
                 } else {
                     Color.secondary.opacity(0.12)
@@ -158,7 +158,7 @@ private struct MediaItemRow: View {
             }
             .frame(width: 56, height: 56)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-
+            
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.url)
                     .font(.caption)
@@ -170,9 +170,9 @@ private struct MediaItemRow: View {
                 ))
                 .font(.caption)
             }
-
+            
             Spacer()
-
+            
             Button("Remove", systemImage: "trash", role: .destructive, action: onRemove)
                 .labelStyle(.iconOnly)
                 .foregroundStyle(.red)

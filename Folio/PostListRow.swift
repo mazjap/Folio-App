@@ -2,7 +2,7 @@ import SwiftUI
 
 struct PostListRow: View {
     let post: PostPreview
-
+    
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             if let hero = post.heroImage, let url = mediaURL(for: hero) {

@@ -52,11 +52,11 @@ extension ProjectDetail {
             links: links
         )
     }
-
+    
     var preview: ProjectPreview {
         ProjectPreview(id: id, title: title, tagline: tagline, heroImage: heroImage, category: category, status: status, featured: featured, createdAt: createdAt, updatedAt: updatedAt)
     }
-
+    
     var nav: ProjectNav {
         ProjectNav(id: id, title: title, status: status)
     }

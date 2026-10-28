@@ -17,7 +17,7 @@ struct MarkdownEditorView: NSViewRepresentable {
     @Binding var text: String
     @Binding var pendingAction: EditorAction?
     var highlightRanges: [NSRange] = []
-
+    
     func makeNSView(context: Context) -> NSScrollView {
         let textView = NSTextView()
         textView.isEditable = true
@@ -32,7 +32,7 @@ struct MarkdownEditorView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.maxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = context.coordinator
-
+        
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -40,15 +40,15 @@ struct MarkdownEditorView: NSViewRepresentable {
         scrollView.documentView = textView
         return scrollView
     }
-
+    
     static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
         (scrollView.documentView as? NSTextView)?.delegate = nil
     }
-
+    
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.parent = self
-
+        
         // Programmatic text update — suppress textDidChange to avoid a round-trip.
         if textView.string != text {
             context.coordinator.isUpdating = true
@@ -62,21 +62,21 @@ struct MarkdownEditorView: NSViewRepresentable {
             }
             context.coordinator.isUpdating = false
         }
-
+        
         // Clear the binding BEFORE mutating the text view so that the
         // textDidChange → updateNSView re-entry sees nil and doesn't act again.
         if let action = pendingAction {
             pendingAction = nil
             apply(action, to: textView)
         }
-
+        
         // Apply diff highlights only when the set of ranges actually changed.
         if context.coordinator.lastHighlightRanges != highlightRanges {
             context.coordinator.lastHighlightRanges = highlightRanges
             applyHighlights(highlightRanges, to: textView)
         }
     }
-
+    
     private func applyHighlights(_ ranges: [NSRange], to textView: NSTextView) {
         guard let lm = textView.layoutManager else { return }
         let docLen = textView.string.utf16.count
@@ -87,16 +87,16 @@ struct MarkdownEditorView: NSViewRepresentable {
             lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.25), forCharacterRange: range)
         }
     }
-
+    
     private func apply(_ action: EditorAction, to textView: NSTextView) {
         let nsString = textView.string as NSString
         let sel = textView.selectedRange()
-
+        
         switch action {
-        case .insertText(let snippet):
+        case let .insertText(snippet):
             textView.insertText(snippet, replacementRange: sel)
-
-        case .wrap(let prefix, let suffix, let placeholder):
+        
+        case let .wrap(prefix, suffix, placeholder):
             if sel.length > 0 {
                 let selected = nsString.substring(with: sel)
                 textView.insertText(prefix + selected + suffix, replacementRange: sel)
@@ -106,22 +106,22 @@ struct MarkdownEditorView: NSViewRepresentable {
                 let newStart = sel.location + prefix.utf16.count
                 textView.setSelectedRange(NSRange(location: newStart, length: placeholder.utf16.count))
             }
-
-        case .prependLine(let prefix):
+        
+        case let .prependLine(prefix):
             let lineRange = nsString.lineRange(for: NSRange(location: sel.location, length: 0))
             // Insert at line start; NSTextView auto-shifts the cursor forward.
             textView.insertText(prefix, replacementRange: NSRange(location: lineRange.location, length: 0))
         }
     }
-
+    
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-
+    
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownEditorView
         var isUpdating = false
         var lastHighlightRanges: [NSRange] = []
         init(_ parent: MarkdownEditorView) { self.parent = parent }
-
+        
         func textDidChange(_ notification: Notification) {
             guard !isUpdating, let tv = notification.object as? NSTextView else { return }
             parent.text = tv.string
@@ -136,7 +136,7 @@ struct MarkdownEditorView: UIViewRepresentable {
     @Binding var text: String
     @Binding var pendingAction: EditorAction?
     var highlightRanges: [NSRange] = []
-
+    
     func makeUIView(context: Context) -> UITextView {
         let tv = UITextView()
         tv.font = .monospacedSystemFont(ofSize: UIFont.systemFontSize, weight: .regular)
@@ -146,7 +146,7 @@ struct MarkdownEditorView: UIViewRepresentable {
         tv.delegate = context.coordinator
         return tv
     }
-
+    
     func updateUIView(_ tv: UITextView, context: Context) {
         if tv.text != text {
             context.coordinator.isUpdating = true
@@ -155,22 +155,22 @@ struct MarkdownEditorView: UIViewRepresentable {
             if sel.location <= tv.text.utf16.count { tv.selectedRange = sel }
             context.coordinator.isUpdating = false
         }
-
+        
         if let action = pendingAction {
             pendingAction = nil
             apply(action, to: tv)
         }
     }
-
+    
     private func apply(_ action: EditorAction, to tv: UITextView) {
         let nsString = tv.text as NSString
         let sel = tv.selectedRange
-
+        
         switch action {
-        case .insertText(let snippet):
+        case let .insertText(snippet):
             tv.insertText(snippet)
-
-        case .wrap(let prefix, let suffix, let placeholder):
+        
+        case let .wrap(prefix, suffix, placeholder):
             if sel.length > 0 {
                 let selected = nsString.substring(with: sel)
                 // Move cursor to selection end first so insertText replaces it.
@@ -181,8 +181,8 @@ struct MarkdownEditorView: UIViewRepresentable {
                 let newStart = sel.location + prefix.utf16.count
                 tv.selectedRange = NSRange(location: newStart, length: placeholder.utf16.count)
             }
-
-        case .prependLine(let prefix):
+        
+        case let .prependLine(prefix):
             let lineRange = nsString.lineRange(for: NSRange(location: sel.location, length: 0))
             tv.selectedRange = NSRange(location: lineRange.location, length: 0)
             tv.insertText(prefix)
@@ -190,14 +190,14 @@ struct MarkdownEditorView: UIViewRepresentable {
             tv.selectedRange = NSRange(location: sel.location + prefix.utf16.count, length: sel.length)
         }
     }
-
+    
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-
+    
     class Coordinator: NSObject, UITextViewDelegate {
         var parent: MarkdownEditorView
         var isUpdating = false
         init(_ parent: MarkdownEditorView) { self.parent = parent }
-
+        
         func textViewDidChange(_ tv: UITextView) {
             guard !isUpdating else { return }
             parent.text = tv.text

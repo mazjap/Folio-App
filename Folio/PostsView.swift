@@ -5,7 +5,7 @@ struct PostsView: View {
     @State private var isCreatingNew = false
     @State private var didLoad = false
     @State private var selectedPostID: String?
-
+    
     var body: some View {
         NavigationStack {
             List(selection: $selectedPostID) {

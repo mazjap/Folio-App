@@ -8,7 +8,7 @@ struct PostEditorView: View {
     @State var vm: PostEditorViewModel
     var onSave: (PostPreview) -> Void
     var onDelete: () -> Void
-
+    
     @State private var showInspector = true
     @State private var showPreview = false
     @State private var showDeleteConfirm = false
@@ -17,7 +17,7 @@ struct PostEditorView: View {
     @State private var diffRanges: [NSRange] = []
     @State private var heroPickerItem: PhotosPickerItem?
     @State private var inlinePickerItem: PhotosPickerItem?
-
+    
     var body: some View {
         VStack(spacing: 0) {
             headerFields
@@ -71,9 +71,9 @@ struct PostEditorView: View {
             Text("Reverts to the last published version.")
         }
     }
-
+    
     // MARK: - Header fields
-
+    
     private var headerFields: some View {
         VStack(alignment: .leading, spacing: 0) {
             TextField("Title", text: $vm.title)
@@ -101,9 +101,9 @@ struct PostEditorView: View {
         }
         .background(.background)
     }
-
+    
     // MARK: - Editor / Preview
-
+    
     @ViewBuilder
     private var editorOrPreview: some View {
         if showPreview {
@@ -116,7 +116,7 @@ struct PostEditorView: View {
             editorWithToolbar
         }
     }
-
+    
     private var editorWithToolbar: some View {
         VStack(spacing: 0) {
             markdownToolbar
@@ -124,9 +124,9 @@ struct PostEditorView: View {
             MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction, highlightRanges: (showDiff && vm.hasDraft) ? diffRanges : [])
         }
     }
-
+    
     // MARK: - Markdown toolbar
-
+    
     private var markdownToolbar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
@@ -179,7 +179,7 @@ struct PostEditorView: View {
         }
         .background(.bar)
     }
-
+    
     private func markdownButton(label: String, title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)
@@ -190,9 +190,9 @@ struct PostEditorView: View {
         .buttonStyle(.plain)
         .help(title)
     }
-
+    
     // MARK: - Toolbar
-
+    
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
@@ -236,20 +236,20 @@ struct PostEditorView: View {
                 .foregroundStyle(.secondary)
         }
     }
-
+    
     // MARK: - Inspector
-
+    
     private var inspectorContent: some View {
         Form {
             Section("Hero Image") {
                 heroImageRow
             }
-
+            
             Section("Metadata") {
                 TextField("Series", text: $vm.series, prompt: Text("Optional series name"))
                 TagsField(tags: $vm.tags)
             }
-
+            
             if vm.createdAt != nil {
                 Section("Dates") {
                     DatePicker(
@@ -267,7 +267,7 @@ struct PostEditorView: View {
                     }
                 }
             }
-
+            
             if case .edit = vm.mode {
                 Section {
                     Button("Delete Post", role: .destructive) {
@@ -281,7 +281,7 @@ struct PostEditorView: View {
         .navigationTitle("Inspector")
         .inspectorColumnWidth(min: 200, ideal: 240, max: 320)
     }
-
+    
     @ViewBuilder
     private var heroImageRow: some View {
         if vm.pendingHeroImage != nil {
@@ -331,9 +331,9 @@ struct PostEditorView: View {
         .foregroundStyle(.tint)
         #endif
     }
-
+    
     // MARK: - Image upload helpers
-
+    
     private func loadHeroFromPicker(_ item: PhotosPickerItem) async {
         guard let data = try? await item.loadTransferable(type: Data.self) else { return }
         let utType = item.supportedContentTypes.first
@@ -342,7 +342,7 @@ struct PostEditorView: View {
         vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
         heroPickerItem = nil
     }
-
+    
     private func loadInlineFromPicker(_ item: PhotosPickerItem) async {
         guard let data = try? await item.loadTransferable(type: Data.self) else { return }
         let utType = item.supportedContentTypes.first
@@ -350,7 +350,7 @@ struct PostEditorView: View {
         let ext = utType?.preferredFilenameExtension ?? "jpg"
         await vm.uploadInlineImage(data: data, mimeType: mimeType, ext: ext)
     }
-
+    
     private func loadHeroFromFileURL(_ url: URL) {
         guard url.startAccessingSecurityScopedResource() else { return }
         defer { url.stopAccessingSecurityScopedResource() }
@@ -359,7 +359,7 @@ struct PostEditorView: View {
         let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
         vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
     }
-
+    
     private func loadInlineFromFileURL(_ url: URL) async {
         guard url.startAccessingSecurityScopedResource() else { return }
         defer { url.stopAccessingSecurityScopedResource() }
@@ -376,7 +376,7 @@ struct PostEditorView: View {
 private struct TagsField: View {
     @Binding var tags: [String]
     @State private var newTag = ""
-
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !tags.isEmpty {
@@ -408,7 +408,7 @@ private struct TagsField: View {
             }
         }
     }
-
+    
     private func addTag() {
         let trimmed = newTag.trimmingCharacters(in: .whitespaces).lowercased()
         guard !trimmed.isEmpty, !tags.contains(trimmed) else { return }
@@ -421,7 +421,7 @@ private struct TagsField: View {
 
 private struct FlowLayout: Layout {
     var spacing: CGFloat
-
+    
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         // Return the proposed width unchanged — returning anything else tells the parent
         // to re-offer a different width, which changes row counts, which changes the size
@@ -434,7 +434,7 @@ private struct FlowLayout: Layout {
         }
         return CGSize(width: availableWidth, height: max(height, 0))
     }
-
+    
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let rows = computeRows(availableWidth: bounds.width, subviews: subviews)
         var y = bounds.minY
@@ -449,7 +449,7 @@ private struct FlowLayout: Layout {
             y += rowHeight + spacing
         }
     }
-
+    
     private func computeRows(availableWidth: CGFloat, subviews: Subviews) -> [[LayoutSubview]] {
         var rows: [[LayoutSubview]] = [[]]
         var rowWidth: CGFloat = 0

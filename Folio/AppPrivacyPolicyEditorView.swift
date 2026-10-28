@@ -9,15 +9,15 @@ class AppPrivacyPolicyEditorViewModel {
     var contactUrl: String
     var contactText: String
     var pendingAction: EditorAction?
-
+    
     var isSaving = false
     var error: APIError?
     var saved: AppPrivacyPolicy?
     var deleted = false
-
+    
     let isEditing: Bool
     private let repo = AppsRepository()
-
+    
     private static let dateFormatter: DateFormatter = {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd"
@@ -25,7 +25,7 @@ class AppPrivacyPolicyEditorViewModel {
         df.timeZone = TimeZone(secondsFromGMT: 0)
         return df
     }()
-
+    
     init(appId: String, existing: AppPrivacyPolicy?) {
         self.appId = appId
         self.isEditing = existing != nil
@@ -35,7 +35,7 @@ class AppPrivacyPolicyEditorViewModel {
         self.contactUrl = existing?.contactUrl ?? ""
         self.contactText = existing?.contactText ?? ""
     }
-
+    
     func save() async {
         isSaving = true
         defer { isSaving = false }
@@ -53,7 +53,7 @@ class AppPrivacyPolicyEditorViewModel {
             self.error = error
         }
     }
-
+    
     func delete() async {
         isSaving = true
         defer { isSaving = false }
@@ -71,28 +71,28 @@ struct AppPrivacyPolicyEditorView: View {
     @State private var vm: AppPrivacyPolicyEditorViewModel
     let onSave: (AppPrivacyPolicy) -> Void
     let onDelete: () -> Void
-
+    
     @State private var showDeleteConfirm = false
-
+    
     init(appId: String, existing: AppPrivacyPolicy?, onSave: @escaping (AppPrivacyPolicy) -> Void, onDelete: @escaping () -> Void) {
         self._vm = State(initialValue: AppPrivacyPolicyEditorViewModel(appId: appId, existing: existing))
         self.onSave = onSave
         self.onDelete = onDelete
     }
-
+    
     var body: some View {
         Form {
             Section("App Info") {
                 TextField("App Name", text: $vm.appName)
                 DatePicker("Last Updated", selection: $vm.lastUpdated, displayedComponents: .date)
             }
-
+            
             Section("Content") {
                 markdownToolbar
                 MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
                     .frame(minHeight: 200)
             }
-
+            
             Section("Contact (optional)") {
                 TextField("Contact URL", text: $vm.contactUrl, prompt: Text("https://…"))
                     .textContentType(.URL)
@@ -101,7 +101,7 @@ struct AppPrivacyPolicyEditorView: View {
                     #endif
                 TextField("Contact label", text: $vm.contactText, prompt: Text("Contact Support"))
             }
-
+            
             if vm.isEditing {
                 Section {
                     Button("Delete Privacy Policy", role: .destructive) {
@@ -135,7 +135,7 @@ struct AppPrivacyPolicyEditorView: View {
             Text("This cannot be undone.")
         }
     }
-
+    
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
@@ -149,7 +149,7 @@ struct AppPrivacyPolicyEditorView: View {
             ToolbarItem(placement: .status) { ProgressView() }
         }
     }
-
+    
     private var markdownToolbar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
@@ -168,7 +168,7 @@ struct AppPrivacyPolicyEditorView: View {
         }
         .background(.bar)
     }
-
+    
     private func mdButton(_ label: String, title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)

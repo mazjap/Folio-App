@@ -3,9 +3,9 @@ import Foundation
 @Observable
 class PostEditorViewModel {
     // MARK: - State
-
+    
     enum Mode { case create, edit(id: String) }
-
+    
     var mode: Mode
     var isLoading = false
     var isSaving = false
@@ -13,10 +13,10 @@ class PostEditorViewModel {
     var saved: PostPreview?
     var deleted = false
     var hasDraft = false
-
+    
     // MARK: - Form fields
     // didSet schedules a debounced draft save on every field change.
-
+    
     var id = ""         { didSet { scheduleAutosave() } }
     var title = ""      { didSet { scheduleAutosave() } }
     var excerpt = ""    { didSet { scheduleAutosave() } }
@@ -35,28 +35,28 @@ class PostEditorViewModel {
     }
     var updatedAt: Date?
     private(set) var serverContent = ""
-
+    
     var estimatedReadingTime: Int {
         max(1, Int(ceil(Double(content.split(separator: " ").count) / 200.0)))
     }
-
+    
     // MARK: - Init
-
+    
     init(mode: Mode) {
         self.mode = mode
     }
-
+    
     deinit { autosaveTask?.cancel() }
-
+    
     private let repo = PostRepository()
     private let mediaRepo = MediaRepository()
     private var autosaveTask: Task<Void, Never>?
     private var isPopulating = false
-
+    
     // MARK: - Actions
-
+    
     func load() async {
-        guard case .edit(let id) = mode else {
+        guard case let .edit(id) = mode else {
             // Create mode: restore any in-progress draft.
             if let draft = DraftStore.load(PostDraft.self, key: draftKey) {
                 isPopulating = true
@@ -83,7 +83,7 @@ class PostEditorViewModel {
             if !error.isCancellation { self.error = error }
         }
     }
-
+    
     func save() async {
         isSaving = true
         defer { isSaving = false }
@@ -109,7 +109,7 @@ class PostEditorViewModel {
                 populate(from: created)
                 isPopulating = false
                 saved = created.preview
-            case .edit(let id):
+            case let .edit(id):
                 let fields = buildUpdate()
                 let updated = try await repo.updatePost(id: id, fields: fields)
                 isPopulating = true
@@ -123,9 +123,9 @@ class PostEditorViewModel {
             self.error = error
         }
     }
-
+    
     func delete() async {
-        guard case .edit(let id) = mode else { return }
+        guard case let .edit(id) = mode else { return }
         isSaving = true
         defer { isSaving = false }
         do {
@@ -136,7 +136,7 @@ class PostEditorViewModel {
             self.error = error
         }
     }
-
+    
     func discardDraft() {
         DraftStore.clear(key: draftKey)
         hasDraft = false
@@ -151,7 +151,7 @@ class PostEditorViewModel {
             Task { await load() }
         }
     }
-
+    
     func saveDraft() {
         guard !isPopulating else { return }
         let draft = PostDraft(
@@ -167,9 +167,9 @@ class PostEditorViewModel {
         )
         DraftStore.save(draft, key: draftKey)
     }
-
+    
     // MARK: - Helpers
-
+    
     func uploadInlineImage(data: Data, mimeType: String, ext: String) async {
         let postID = currentID
         guard !postID.isEmpty else { return }
@@ -186,11 +186,11 @@ class PostEditorViewModel {
             self.error = error
         }
     }
-
+    
     func computeDiffRanges() -> [NSRange] {
         computeChangedLineRanges(from: serverContent, to: content)
     }
-
+    
     func scheduleAutosave() {
         guard !isPopulating else { return }
         autosaveTask?.cancel()
@@ -200,23 +200,23 @@ class PostEditorViewModel {
             self?.saveDraft()
         }
     }
-
+    
     var currentID: String {
         switch mode {
         case .create:
             return id.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-")
-        case .edit(let editID):
+        case let .edit(editID):
             return editID
         }
     }
-
+    
     private var draftKey: String {
         switch mode {
         case .create: return "post-new"
-        case .edit(let id): return "post-\(id)"
+        case let .edit(id): return "post-\(id)"
         }
     }
-
+    
     private func populateFromDraft(_ draft: PostDraft) {
         if case .create = mode { id = draft.id }
         title = draft.title
@@ -227,7 +227,7 @@ class PostEditorViewModel {
         series = draft.series
         if let draftCreatedAt = draft.createdAt { createdAt = draftCreatedAt }
     }
-
+    
     private func populate(from detail: PostDetail) {
         serverContent = detail.content
         id = detail.id
@@ -241,7 +241,7 @@ class PostEditorViewModel {
         createdAt = detail.createdAt
         updatedAt = detail.updatedAt
     }
-
+    
     private func buildDetail() -> PostDetail {
         PostDetail(
             content: content,
@@ -256,7 +256,7 @@ class PostEditorViewModel {
             series: series.isEmpty ? nil : series
         )
     }
-
+    
     private func buildUpdate() -> PostUpdate {
         PostUpdate(
             title: title,

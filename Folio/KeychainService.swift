@@ -19,16 +19,16 @@ enum KeychainService {
         case dataEncodingFailed
         case dataDecodingFailed
     }
-
+    
     static func save(_ value: String, key: String) throws(KeychainError) {
         guard let data = value.data(using: .utf8) else { throw .dataEncodingFailed }
-
+        
         let deleteQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrAccount: key
         ]
         SecItemDelete(deleteQuery as CFDictionary)
-
+        
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrAccount: key,
@@ -38,7 +38,7 @@ enum KeychainService {
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         guard status == errSecSuccess else { throw .unexpectedStatus(status) }
     }
-
+    
     static func read(key: String) -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
@@ -55,7 +55,7 @@ enum KeychainService {
         }
         return string
     }
-
+    
     static func delete(key: String) {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,

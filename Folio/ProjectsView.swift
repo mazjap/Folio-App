@@ -5,7 +5,7 @@ struct ProjectsView: View {
     @State private var isCreatingNew = false
     @State private var didLoad = false
     @State private var selectedProjectID: String?
-
+    
     var body: some View {
         NavigationStack {
             List(selection: $selectedProjectID) {

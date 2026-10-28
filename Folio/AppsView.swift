@@ -3,16 +3,16 @@ import SwiftUI
 @Observable
 class AppsViewModel {
     var apps: [AppRecord] = []
-
+    
     private let storageKey = "folio.apps"
-
+    
     func load() {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
               let stored = try? JSONDecoder().decode([AppRecord].self, from: data)
         else { return }
         apps = stored
     }
-
+    
     func addApp(id: String) {
         let slug = id.trimmingCharacters(in: .whitespaces)
             .lowercased()
@@ -21,12 +21,12 @@ class AppsViewModel {
         apps.append(AppRecord(id: slug))
         persist()
     }
-
+    
     func delete(app: AppRecord) {
         apps.removeAll { $0.id == app.id }
         persist()
     }
-
+    
     private func persist() {
         guard let data = try? JSONEncoder().encode(apps) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
@@ -38,7 +38,7 @@ struct AppsView: View {
     @State private var selectedAppID: String?
     @State private var showAddAlert = false
     @State private var newAppID = ""
-
+    
     var body: some View {
         NavigationStack {
             List(selection: $selectedAppID) {

@@ -10,15 +10,15 @@ class AppSupportEditorViewModel {
     var contactUrl: String
     var contactText: String
     var pendingAction: EditorAction?
-
+    
     var isSaving = false
     var error: APIError?
     var saved: AppSupport?
     var deleted = false
-
+    
     let isEditing: Bool
     private let repo = AppsRepository()
-
+    
     init(appId: String, existing: AppSupport?) {
         self.appId = appId
         self.isEditing = existing != nil
@@ -29,7 +29,7 @@ class AppSupportEditorViewModel {
         self.contactUrl = existing?.contactUrl ?? ""
         self.contactText = existing?.contactText ?? ""
     }
-
+    
     func save() async {
         isSaving = true
         defer { isSaving = false }
@@ -48,7 +48,7 @@ class AppSupportEditorViewModel {
             self.error = error
         }
     }
-
+    
     func delete() async {
         isSaving = true
         defer { isSaving = false }
@@ -66,15 +66,15 @@ struct AppSupportEditorView: View {
     @State private var vm: AppSupportEditorViewModel
     let onSave: (AppSupport) -> Void
     let onDelete: () -> Void
-
+    
     @State private var showDeleteConfirm = false
-
+    
     init(appId: String, existing: AppSupport?, onSave: @escaping (AppSupport) -> Void, onDelete: @escaping () -> Void) {
         self._vm = State(initialValue: AppSupportEditorViewModel(appId: appId, existing: existing))
         self.onSave = onSave
         self.onDelete = onDelete
     }
-
+    
     var body: some View {
         Form {
             Section("App Info") {
@@ -83,13 +83,13 @@ struct AppSupportEditorView: View {
                 TextField("Subtitle", text: $vm.subtitle, axis: .vertical)
                     .lineLimit(2...4)
             }
-
+            
             Section("Content") {
                 markdownToolbar
                 MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
                     .frame(minHeight: 200)
             }
-
+            
             Section("Contact (optional)") {
                 TextField("Contact URL", text: $vm.contactUrl, prompt: Text("https://…"))
                     .textContentType(.URL)
@@ -98,7 +98,7 @@ struct AppSupportEditorView: View {
                     #endif
                 TextField("Contact label", text: $vm.contactText, prompt: Text("Visit Website"))
             }
-
+            
             if vm.isEditing {
                 Section {
                     Button("Delete Support Page", role: .destructive) {
@@ -132,7 +132,7 @@ struct AppSupportEditorView: View {
             Text("This cannot be undone.")
         }
     }
-
+    
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
@@ -146,7 +146,7 @@ struct AppSupportEditorView: View {
             ToolbarItem(placement: .status) { ProgressView() }
         }
     }
-
+    
     private var markdownToolbar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
@@ -165,7 +165,7 @@ struct AppSupportEditorView: View {
         }
         .background(.bar)
     }
-
+    
     private func mdButton(_ label: String, title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)

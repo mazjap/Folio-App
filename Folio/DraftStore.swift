@@ -35,7 +35,7 @@ func computeChangedLineRanges(from serverText: String, to currentText: String) -
     let currentLines = currentText.components(separatedBy: "\n")
     let diff = currentLines.difference(from: serverLines)
     var insertedIndices = Set<Int>()
-    for case .insert(let offset, _, _) in diff { insertedIndices.insert(offset) }
+    for case let .insert(offset, _, _) in diff { insertedIndices.insert(offset) }
     var ranges: [NSRange] = []
     var charOffset = 0
     for (i, line) in currentLines.enumerated() {
@@ -53,16 +53,16 @@ enum DraftStore {
         guard let data = try? JSONEncoder().encode(draft) else { return }
         try? data.write(to: url(for: key), options: .atomic)
     }
-
+    
     static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
         guard let data = try? Data(contentsOf: url(for: key)) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
-
+    
     static func clear(key: String) {
         try? FileManager.default.removeItem(at: url(for: key))
     }
-
+    
     private static func url(for key: String) -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Folio/drafts", isDirectory: true)

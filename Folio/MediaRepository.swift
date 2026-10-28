@@ -20,7 +20,7 @@ struct MediaRepository: MediaRepositoryProtocol {
     private func processor() throws(APIError) -> URLProcessor {
         try .fromSettings()
     }
-
+    
     func upload(fileData: Data, fileName: String, mimeType: String, context: MediaContext, id: String) async throws(APIError) -> String {
         let p = try processor()
         let url = p.baseURL.appending(path: "api").appending(path: "media").appending(path: "upload")
@@ -28,7 +28,7 @@ struct MediaRepository: MediaRepositoryProtocol {
         let response = try p.decode(MediaUploadResponse.self, from: data)
         return response.url
     }
-
+    
     func deleteFile(context: MediaContext, id: String, fileName: String) async throws(APIError) {
         let p = try processor()
         let url = p.baseURL

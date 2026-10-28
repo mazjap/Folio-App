@@ -7,9 +7,9 @@ struct SettingsView: View {
     @State private var devApiKey = KeychainService.read(key: FolioStorageKey.devApiKey) ?? ""
     @State private var prodApiKey = KeychainService.read(key: FolioStorageKey.prodApiKey) ?? ""
     @State private var showKeySaved = false
-
+    
     private var isDev: Bool { activeEnvironment == "dev" }
-
+    
     var body: some View {
         Form {
             Picker("Environment", selection: $activeEnvironment) {
@@ -19,7 +19,7 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets())
-
+            
             Section("Server") {
                 if isDev {
                     TextField("Base URL", text: $devURL, prompt: Text("http://localhost:3001"))
@@ -45,7 +45,7 @@ struct SettingsView: View {
                         }
                 }
             }
-
+            
             Section("API Key") {
                 if isDev {
                     SecureField("Bearer token", text: $devApiKey, prompt: Text("Paste your API key"))

@@ -5,9 +5,9 @@ class PostsViewModel {
     var posts: [PostPreview] = []
     var isLoading = false
     var error: APIError?
-
+    
     private let repo = PostRepository()
-
+    
     func fetchPosts() async {
         isLoading = true
         defer { isLoading = false }
@@ -17,7 +17,7 @@ class PostsViewModel {
             if !error.isCancellation { self.error = error }
         }
     }
-
+    
     func deletePost(id: String) async {
         do {
             try await repo.deletePost(id: id)
@@ -26,7 +26,7 @@ class PostsViewModel {
             if !error.isCancellation { self.error = error }
         }
     }
-
+    
     func appendOrReplace(_ preview: PostPreview) {
         if let idx = posts.firstIndex(where: { $0.id == preview.id }) {
             posts[idx] = preview

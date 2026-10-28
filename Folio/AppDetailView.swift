@@ -9,18 +9,18 @@ class AppDetailViewModel {
     var privacyPolicyFailed = false
     var supportFailed = false
     var isLoading = false
-
+    
     let appId: String
     private let repo = AppsRepository()
-
+    
     init(appId: String) { self.appId = appId }
-
+    
     func load() async {
         isLoading = true
         privacyPolicyMissing = false; supportMissing = false
         privacyPolicyFailed = false; supportFailed = false
         defer { isLoading = false }
-
+        
         do {
             privacyPolicy = try await repo.fetchPrivacyPolicy(appId: appId)
         } catch {
@@ -28,7 +28,7 @@ class AppDetailViewModel {
             if case .notFound = error { privacyPolicyMissing = true }
             else if !error.isCancellation { privacyPolicyFailed = true }
         }
-
+        
         do {
             support = try await repo.fetchSupport(appId: appId)
         } catch {
@@ -42,12 +42,12 @@ class AppDetailViewModel {
 struct AppDetailView: View {
     let appId: String
     @State private var vm: AppDetailViewModel
-
+    
     init(appId: String) {
         self.appId = appId
         self._vm = State(initialValue: AppDetailViewModel(appId: appId))
     }
-
+    
     var body: some View {
         List {
             Section("Privacy Policy") {
@@ -86,7 +86,7 @@ struct AppDetailView: View {
                         .foregroundStyle(.orange)
                 }
             }
-
+            
             Section("Support") {
                 if vm.isLoading {
                     ProgressView()

@@ -40,11 +40,11 @@ extension PostDetail {
             series: preview.series
         )
     }
-
+    
     var preview: PostPreview {
         PostPreview(id: id, title: title, excerpt: excerpt, heroImage: heroImage, tags: tags, createdAt: createdAt, updatedAt: updatedAt, readingTime: readingTime, series: series)
     }
-
+    
     var nav: PostNav {
         PostNav(id: id, title: title, tags: tags, createdAt: createdAt, series: series)
     }

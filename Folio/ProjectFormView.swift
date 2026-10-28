@@ -7,7 +7,7 @@ struct ProjectFormView: View {
     @State var vm: ProjectFormViewModel
     var onSave: (ProjectPreview) -> Void
     var onDelete: () -> Void
-
+    
     @State private var showInspector = true
     @State private var showDeleteConfirm = false
     @State private var showDiscardDraftConfirm = false
@@ -18,7 +18,7 @@ struct ProjectFormView: View {
     @State private var newLinkURL = ""
     @State private var heroPickerItem: PhotosPickerItem?
     @State private var descriptionPickerItem: PhotosPickerItem?
-
+    
     var body: some View {
         Form {
             Section("Details") {
@@ -35,25 +35,25 @@ struct ProjectFormView: View {
                 TextField("Category", text: $vm.category, prompt: Text("iOS App, Web, macOS App…"))
                 heroImageRow
             }
-
+            
             Section("Description") {
                 descriptionImageToolbar
                 MarkdownEditorView(text: $vm.description, pendingAction: $vm.pendingDescriptionAction, highlightRanges: (showDiff && vm.hasDraft) ? diffDescriptionRanges : [])
                     .frame(minHeight: 160)
             }
-
+            
             Section {
                 techStackRows
             } header: {
                 Text("Tech Stack")
             }
-
+            
             Section {
                 linksRows
             } header: {
                 Text("Links")
             }
-
+            
             Section("Media") {
                 MediaManagerView(media: $vm.media, context: .projects, id: vm.currentID)
             }
@@ -106,9 +106,9 @@ struct ProjectFormView: View {
             Text("Reverts to the last published version.")
         }
     }
-
+    
     // MARK: - Hero image row
-
+    
     @ViewBuilder
     private var heroImageRow: some View {
         if vm.pendingHeroImage != nil {
@@ -158,9 +158,9 @@ struct ProjectFormView: View {
         .foregroundStyle(.tint)
         #endif
     }
-
+    
     // MARK: - Description image toolbar
-
+    
     private var descriptionImageToolbar: some View {
         HStack(spacing: 6) {
             PhotosPicker(selection: $descriptionPickerItem, matching: .images) {
@@ -191,9 +191,9 @@ struct ProjectFormView: View {
         }
         .padding(.vertical, 2)
     }
-
+    
     // MARK: - Tech stack
-
+    
     private var techStackRows: some View {
         Group {
             ForEach(vm.techStack, id: \.self) { tag in
@@ -216,16 +216,16 @@ struct ProjectFormView: View {
             }
         }
     }
-
+    
     private func addTag() {
         let trimmed = newTag.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !vm.techStack.contains(trimmed) else { return }
         vm.techStack.append(trimmed)
         newTag = ""
     }
-
+    
     // MARK: - Links
-
+    
     private var linksRows: some View {
         Group {
             ForEach(Array(vm.links.keys.sorted()), id: \.self) { key in
@@ -254,7 +254,7 @@ struct ProjectFormView: View {
             }
         }
     }
-
+    
     private func addLink() {
         let name = newLinkName.trimmingCharacters(in: .whitespaces)
         let url = newLinkURL.trimmingCharacters(in: .whitespaces)
@@ -263,9 +263,9 @@ struct ProjectFormView: View {
         newLinkName = ""
         newLinkURL = ""
     }
-
+    
     // MARK: - Toolbar
-
+    
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
@@ -300,9 +300,9 @@ struct ProjectFormView: View {
             }
         }
     }
-
+    
     // MARK: - Inspector
-
+    
     private var inspectorContent: some View {
         Form {
             Section("Status") {
@@ -314,7 +314,7 @@ struct ProjectFormView: View {
                 .pickerStyle(.menu)
                 Toggle("Featured", isOn: $vm.featured)
             }
-
+            
             if vm.createdAt != nil {
                 Section("Dates") {
                     DatePicker(
@@ -332,7 +332,7 @@ struct ProjectFormView: View {
                     }
                 }
             }
-
+            
             if case .edit = vm.mode {
                 Section {
                     Button("Delete Project", role: .destructive) {
@@ -346,9 +346,9 @@ struct ProjectFormView: View {
         .navigationTitle("Inspector")
         .inspectorColumnWidth(min: 200, ideal: 240, max: 320)
     }
-
+    
     // MARK: - Image upload helpers
-
+    
     private func loadHeroFromPicker(_ item: PhotosPickerItem) async {
         guard let data = try? await item.loadTransferable(type: Data.self) else { return }
         let utType = item.supportedContentTypes.first
@@ -357,7 +357,7 @@ struct ProjectFormView: View {
         vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
         heroPickerItem = nil
     }
-
+    
     private func loadDescriptionImageFromPicker(_ item: PhotosPickerItem) async {
         guard let data = try? await item.loadTransferable(type: Data.self) else { return }
         let utType = item.supportedContentTypes.first
@@ -365,7 +365,7 @@ struct ProjectFormView: View {
         let ext = utType?.preferredFilenameExtension ?? "jpg"
         await vm.uploadInlineImageToDescription(data: data, mimeType: mimeType, ext: ext)
     }
-
+    
     private func loadHeroFromFileURL(_ url: URL) {
         guard url.startAccessingSecurityScopedResource() else { return }
         defer { url.stopAccessingSecurityScopedResource() }
@@ -374,7 +374,7 @@ struct ProjectFormView: View {
         let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
         vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
     }
-
+    
     private func loadDescriptionImageFromFileURL(_ url: URL) async {
         guard url.startAccessingSecurityScopedResource() else { return }
         defer { url.stopAccessingSecurityScopedResource() }

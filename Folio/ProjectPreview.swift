@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ProjectListRow: View {
     let project: ProjectPreview
-
+    
     var body: some View {
         HStack(spacing: 12) {
             if let url = mediaURL(for: project.heroImage) {
@@ -43,7 +43,7 @@ struct ProjectListRow: View {
 
 struct ProjectStatusBadge: View {
     let status: ProjectStatus
-
+    
     var body: some View {
         Text(label)
             .font(.caption2)
@@ -53,7 +53,7 @@ struct ProjectStatusBadge: View {
             .background(color.opacity(0.15), in: Capsule())
             .foregroundStyle(color)
     }
-
+    
     private var label: String {
         switch status {
         case .active: return "Active"
@@ -61,7 +61,7 @@ struct ProjectStatusBadge: View {
         case .archived: return "Archived"
         }
     }
-
+    
     private var color: Color {
         switch status {
         case .active: return .green
