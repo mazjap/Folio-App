@@ -46,8 +46,6 @@ class PostEditorViewModel {
         self.mode = mode
     }
     
-    deinit { autosaveTask?.cancel() }
-    
     private let repo = PostRepository()
     private let mediaRepo = MediaRepository()
     private var autosaveTask: Task<Void, Never>?

@@ -46,8 +46,6 @@ class ProjectFormViewModel {
         self.mode = mode
     }
     
-    deinit { autosaveTask?.cancel() }
-    
     private let repo = ProjectRepository()
     private let mediaRepo = MediaRepository()
     private var autosaveTask: Task<Void, Never>?

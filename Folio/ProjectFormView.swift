@@ -124,10 +124,12 @@ struct ProjectFormView: View {
             .frame(height: 80)
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+        let hasHeroImage = vm.pendingHeroImage != nil || !vm.heroImage.isEmpty
+        
         HStack(spacing: 8) {
             PhotosPicker(selection: $heroPickerItem, matching: .images) {
                 Label(
-                    vm.pendingHeroImage != nil || !vm.heroImage.isEmpty ? "Change Hero Image" : "Set Hero Image",
+                    hasHeroImage ? "Change Hero Image" : "Set Hero Image",
                     systemImage: "photo.badge.plus"
                 )
             }
@@ -135,7 +137,7 @@ struct ProjectFormView: View {
                 guard let item else { return }
                 Task { await loadHeroFromPicker(item) }
             }
-            if vm.pendingHeroImage != nil || !vm.heroImage.isEmpty {
+            if hasHeroImage {
                 Spacer()
                 Button("Clear", role: .destructive) {
                     vm.pendingHeroImage = nil

@@ -297,10 +297,12 @@ struct PostEditorView: View {
             .frame(height: 80)
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+        let hasHeroImage = vm.pendingHeroImage != nil || !vm.heroImage.isEmpty
+        
         HStack(spacing: 8) {
             PhotosPicker(selection: $heroPickerItem, matching: .images) {
                 Label(
-                    vm.pendingHeroImage != nil || !vm.heroImage.isEmpty ? "Change Image" : "Set Hero Image",
+                    hasHeroImage ? "Change Image" : "Set Hero Image",
                     systemImage: "photo.badge.plus"
                 )
             }
@@ -308,7 +310,7 @@ struct PostEditorView: View {
                 guard let item else { return }
                 Task { await loadHeroFromPicker(item) }
             }
-            if vm.pendingHeroImage != nil || !vm.heroImage.isEmpty {
+            if hasHeroImage {
                 Spacer()
                 Button("Clear", role: .destructive) {
                     vm.pendingHeroImage = nil
