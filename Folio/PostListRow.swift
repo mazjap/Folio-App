@@ -1,7 +1,11 @@
 import SwiftUI
 
 struct PostListRow: View {
-    let post: PostPreview
+    private let post: PostPreview
+    
+    init(post: PostPreview) {
+        self.post = post
+    }
     
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -53,5 +57,11 @@ struct PostListRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+#Preview {
+    List {
+        PostListRow(post: PostDetail.sample.preview)
     }
 }

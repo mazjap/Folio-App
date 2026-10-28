@@ -1,12 +1,10 @@
 import SwiftUI
-import PhotosUI
-import UniformTypeIdentifiers
 
 struct ProjectFormView: View {
     @Environment(\.dismiss) private var dismiss
-    @State var vm: ProjectFormViewModel
-    var onSave: (ProjectPreview) -> Void
-    var onDelete: () -> Void
+    @State private var vm: ProjectFormViewModel
+    private let onSave: (ProjectPreview) -> Void
+    private let onDelete: () -> Void
     
     @State private var showInspector = true
     @State private var showDeleteConfirm = false
@@ -16,8 +14,12 @@ struct ProjectFormView: View {
     @State private var newTag = ""
     @State private var newLinkName = ""
     @State private var newLinkURL = ""
-    @State private var heroPickerItem: PhotosPickerItem?
-    @State private var descriptionPickerItem: PhotosPickerItem?
+    
+    init(vm: ProjectFormViewModel, onSave: @escaping (ProjectPreview) -> Void, onDelete: @escaping () -> Void) {
+        self._vm = State(initialValue: vm)
+        self.onSave = onSave
+        self.onDelete = onDelete
+    }
     
     var body: some View {
         Form {
@@ -29,33 +31,37 @@ struct ProjectFormView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         #endif
+                        .disabled(vm.hasUploadedFiles)
+                        .help(vm.hasUploadedFiles ? "Images are uploaded under this ID, so it can't change." : "")
                 }
                 TextField("Title", text: $vm.title)
                 TextField("Tagline", text: $vm.tagline)
                 TextField("Category", text: $vm.category, prompt: Text("iOS App, Web, macOS App…"))
-                heroImageRow
+                HeroImageRow(heroImage: $vm.heroImage, pendingHeroImage: $vm.pendingHeroImage, uploadsOn: "save")
             }
             
             Section("Description") {
-                descriptionImageToolbar
+                MarkdownToolbar(pendingAction: $vm.pendingDescriptionAction) {
+                    InsertImageButtons(isEnabled: vm.canUploadFiles) { image in
+                        await vm.uploadInlineImageToDescription(image)
+                    }
+                }
                 MarkdownEditorView(text: $vm.description, pendingAction: $vm.pendingDescriptionAction, highlightRanges: (showDiff && vm.hasDraft) ? diffDescriptionRanges : [])
                     .frame(minHeight: 160)
             }
             
-            Section {
+            Section("Tech Stack") {
                 techStackRows
-            } header: {
-                Text("Tech Stack")
             }
             
-            Section {
+            Section("Links") {
                 linksRows
-            } header: {
-                Text("Links")
             }
             
             Section("Media") {
-                MediaManagerView(media: $vm.media, context: .projects, id: vm.currentID)
+                MediaManagerView(media: $vm.media, isUploadEnabled: vm.canUploadFiles, isUploading: vm.isUploadingMedia) { images in
+                    await vm.addMedia(images)
+                }
             }
         }
         .formStyle(.grouped)
@@ -65,34 +71,32 @@ struct ProjectFormView: View {
             inspectorContent
         }
         .task { await vm.load() }
-        .onDisappear { if !vm.deleted { vm.saveDraft() } }
+        .onDisappear { vm.saveDraftNow() }
         .onChange(of: showDiff) {
             diffDescriptionRanges = showDiff ? vm.computeDiffDescriptionRanges() : []
         }
         .onChange(of: vm.description) {
             guard showDiff else { return }
+            
             diffDescriptionRanges = vm.computeDiffDescriptionRanges()
         }
         .onChange(of: vm.hasDraft) {
-            if !vm.hasDraft { showDiff = false; diffDescriptionRanges = [] }
+            if !vm.hasDraft {
+                showDiff = false
+                diffDescriptionRanges = []
+            }
         }
         .onChange(of: vm.saved) { _, preview in
             if let preview { onSave(preview) }
         }
-        .onChange(of: vm.deleted) { _, gone in
-            if gone {
+        .onChange(of: vm.deleted) { _, isDeleted in
+            if isDeleted {
                 onDelete()
                 dismiss()
             }
         }
-        .alert("Error", isPresented: Binding(
-            get: { vm.error != nil },
-            set: { if !$0 { vm.error = nil } }
-        )) {
-            Button("OK", role: .cancel) { vm.error = nil }
-        } message: {
-            Text(vm.error?.localizedDescription ?? "")
-        }
+        .errorAlert($vm.error)
+        .staleDraftAlert(isPresented: $vm.isDraftStale, itemKind: "project", onKeep: vm.keepStaleDraft, onDiscard: vm.discardDraft)
         .confirmationDialog("Delete \"\(vm.title)\"?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}
@@ -107,153 +111,65 @@ struct ProjectFormView: View {
         }
     }
     
-    // MARK: - Hero image row
-    
-    @ViewBuilder
-    private var heroImageRow: some View {
-        if vm.pendingHeroImage != nil {
-            Label("Image selected · uploads on save", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.callout)
-        } else if let heroURL = mediaURL(for: vm.heroImage) {
-            AsyncImage(url: heroURL) { image in
-                image.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Color.secondary.opacity(0.15)
-            }
-            .frame(height: 80)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        let hasHeroImage = vm.pendingHeroImage != nil || !vm.heroImage.isEmpty
-        
-        HStack(spacing: 8) {
-            PhotosPicker(selection: $heroPickerItem, matching: .images) {
-                Label(
-                    hasHeroImage ? "Change Hero Image" : "Set Hero Image",
-                    systemImage: "photo.badge.plus"
-                )
-            }
-            .onChange(of: heroPickerItem) { _, item in
-                guard let item else { return }
-                Task { await loadHeroFromPicker(item) }
-            }
-            if hasHeroImage {
-                Spacer()
-                Button("Clear", role: .destructive) {
-                    vm.pendingHeroImage = nil
-                    vm.heroImage = ""
-                    heroPickerItem = nil
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.red)
-            }
-        }
-        #if os(macOS)
-        Button("Select from Files…") {
-            let panel = NSOpenPanel()
-            panel.allowedContentTypes = [.image]
-            panel.allowsMultipleSelection = false
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            loadHeroFromFileURL(url)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.tint)
-        #endif
-    }
-    
-    // MARK: - Description image toolbar
-    
-    private var descriptionImageToolbar: some View {
-        HStack(spacing: 6) {
-            PhotosPicker(selection: $descriptionPickerItem, matching: .images) {
-                Label("Insert Image", systemImage: "photo.badge.plus")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .onChange(of: descriptionPickerItem) { _, item in
-                guard let item else { return }
-                Task {
-                    await loadDescriptionImageFromPicker(item)
-                    descriptionPickerItem = nil
-                }
-            }
-            #if os(macOS)
-            Button("From Files", systemImage: "folder") {
-                let panel = NSOpenPanel()
-                panel.allowedContentTypes = [.image]
-                panel.allowsMultipleSelection = false
-                guard panel.runModal() == .OK, let url = panel.url else { return }
-                Task { await loadDescriptionImageFromFileURL(url) }
-            }
-            .labelStyle(.titleAndIcon)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            #endif
-            Spacer()
-        }
-        .padding(.vertical, 2)
-    }
-    
     // MARK: - Tech stack
     
+    @ViewBuilder
     private var techStackRows: some View {
-        Group {
-            ForEach(vm.techStack, id: \.self) { tag in
-                HStack {
-                    Text(tag)
-                    Spacer()
-                    Button("Remove", systemImage: "minus.circle.fill", role: .destructive) {
-                        vm.techStack.removeAll { $0 == tag }
-                    }
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(.red)
-                    .buttonStyle(.plain)
-                }
-            }
+        ForEach(vm.techStack, id: \.self) { tag in
             HStack {
-                TextField("Add technology…", text: $newTag)
-                    .onSubmit { addTag() }
-                Button("Add", action: addTag)
-                    .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
+                Text(tag)
+                Spacer()
+                Button("Remove", systemImage: "minus.circle.fill", role: .destructive) {
+                    vm.techStack.removeAll { $0 == tag }
+                }
+                .labelStyle(.iconOnly)
+                .foregroundStyle(.red)
+                .buttonStyle(.plain)
             }
+        }
+        HStack {
+            TextField("Add technology…", text: $newTag)
+                .onSubmit { addTag() }
+            Button("Add", action: addTag)
+                .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
         }
     }
     
     private func addTag() {
         let trimmed = newTag.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !vm.techStack.contains(trimmed) else { return }
+        
         vm.techStack.append(trimmed)
         newTag = ""
     }
     
     // MARK: - Links
     
+    @ViewBuilder
     private var linksRows: some View {
-        Group {
-            ForEach(Array(vm.links.keys.sorted()), id: \.self) { key in
-                HStack {
-                    Text(key).bold()
-                    Spacer()
-                    Text(vm.links[key] ?? "").foregroundStyle(.secondary).lineLimit(1)
-                    Button("Remove", systemImage: "minus.circle.fill", role: .destructive) {
-                        vm.links.removeValue(forKey: key)
-                    }
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(.red)
-                    .buttonStyle(.plain)
+        ForEach(vm.links.keys.sorted(), id: \.self) { key in
+            HStack {
+                Text(key).bold()
+                Spacer()
+                Text(vm.links[key] ?? "").foregroundStyle(.secondary).lineLimit(1)
+                Button("Remove", systemImage: "minus.circle.fill", role: .destructive) {
+                    vm.links.removeValue(forKey: key)
                 }
+                .labelStyle(.iconOnly)
+                .foregroundStyle(.red)
+                .buttonStyle(.plain)
             }
-            VStack(spacing: 8) {
-                TextField("Link name (e.g. GitHub)", text: $newLinkName)
-                TextField("URL", text: $newLinkURL, prompt: Text("https://…"))
-                    .textContentType(.URL)
-                    #if !os(macOS)
-                    .keyboardType(.URL)
-                    #endif
-                    .onSubmit { addLink() }
-                Button("Add Link", action: addLink)
-                    .disabled(newLinkName.isEmpty || newLinkURL.isEmpty)
-            }
+        }
+        VStack(spacing: 8) {
+            TextField("Link name (e.g. GitHub)", text: $newLinkName)
+            TextField("URL", text: $newLinkURL, prompt: Text("https://…"))
+                .textContentType(.URL)
+                #if !os(macOS)
+                .keyboardType(.URL)
+                #endif
+                .onSubmit { addLink() }
+            Button("Add Link", action: addLink)
+                .disabled(newLinkName.isEmpty || newLinkURL.isEmpty)
         }
     }
     
@@ -261,6 +177,7 @@ struct ProjectFormView: View {
         let name = newLinkName.trimmingCharacters(in: .whitespaces)
         let url = newLinkURL.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty, !url.isEmpty else { return }
+        
         vm.links[name] = url
         newLinkName = ""
         newLinkURL = ""
@@ -274,7 +191,7 @@ struct ProjectFormView: View {
             Button("Save", systemImage: "square.and.arrow.up") {
                 Task { await vm.save() }
             }
-            .disabled(vm.title.isEmpty || vm.isSaving)
+            .disabled(vm.title.isEmpty || vm.currentID.isEmpty || vm.isSaving)
             .keyboardShortcut("s", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -322,7 +239,7 @@ struct ProjectFormView: View {
                     DatePicker(
                         "Created",
                         selection: Binding(
-                            get: { vm.createdAt ?? Date() },
+                            get: { vm.createdAt ?? .now },
                             set: { vm.createdAt = $0 }
                         ),
                         displayedComponents: .date
@@ -348,41 +265,14 @@ struct ProjectFormView: View {
         .navigationTitle("Inspector")
         .inspectorColumnWidth(min: 200, ideal: 240, max: 320)
     }
-    
-    // MARK: - Image upload helpers
-    
-    private func loadHeroFromPicker(_ item: PhotosPickerItem) async {
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-        let utType = item.supportedContentTypes.first
-        let mimeType = utType?.preferredMIMEType ?? "image/jpeg"
-        let ext = utType?.preferredFilenameExtension ?? "jpg"
-        vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
-        heroPickerItem = nil
-    }
-    
-    private func loadDescriptionImageFromPicker(_ item: PhotosPickerItem) async {
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-        let utType = item.supportedContentTypes.first
-        let mimeType = utType?.preferredMIMEType ?? "image/jpeg"
-        let ext = utType?.preferredFilenameExtension ?? "jpg"
-        await vm.uploadInlineImageToDescription(data: data, mimeType: mimeType, ext: ext)
-    }
-    
-    private func loadHeroFromFileURL(_ url: URL) {
-        guard url.startAccessingSecurityScopedResource() else { return }
-        defer { url.stopAccessingSecurityScopedResource() }
-        guard let data = try? Data(contentsOf: url) else { return }
-        let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
-        let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-        vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
-    }
-    
-    private func loadDescriptionImageFromFileURL(_ url: URL) async {
-        guard url.startAccessingSecurityScopedResource() else { return }
-        defer { url.stopAccessingSecurityScopedResource() }
-        guard let data = try? Data(contentsOf: url) else { return }
-        let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
-        let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-        await vm.uploadInlineImageToDescription(data: data, mimeType: mimeType, ext: ext)
+}
+
+#Preview {
+    NavigationStack {
+        ProjectFormView(
+            vm: ProjectFormViewModel(mode: .edit(id: ProjectDetail.sample.id), repo: TestProjectRepository(), mediaRepo: TestMediaRepository(), drafts: .temporary()),
+            onSave: { _ in },
+            onDelete: {}
+        )
     }
 }

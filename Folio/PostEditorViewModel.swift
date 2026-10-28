@@ -4,7 +4,10 @@ import Foundation
 class PostEditorViewModel {
     // MARK: - State
     
-    enum Mode { case create, edit(id: String) }
+    enum Mode: Equatable {
+        case create
+        case edit(id: String)
+    }
     
     var mode: Mode
     var isLoading = false
@@ -12,148 +15,96 @@ class PostEditorViewModel {
     var error: APIError?
     var saved: PostPreview?
     var deleted = false
-    var hasDraft = false
     
     // MARK: - Form fields
-    // didSet schedules a debounced draft save on every field change.
+    // Each change schedules a draft save.
     
-    var id = ""         { didSet { scheduleAutosave() } }
-    var title = ""      { didSet { scheduleAutosave() } }
-    var excerpt = ""    { didSet { scheduleAutosave() } }
-    var content = ""    { didSet { scheduleAutosave() } }
-    var tags: [String] = [] { didSet { scheduleAutosave() } }
-    var series = ""     { didSet { scheduleAutosave() } }
-    var heroImage = ""
+    var id = ""                 { didSet { fieldChanged() } }
+    var title = ""              { didSet { fieldChanged() } }
+    var excerpt = ""            { didSet { fieldChanged() } }
+    var content = ""            { didSet { fieldChanged() } }
+    var tags: [String] = []     { didSet { fieldChanged() } }
+    var series = ""             { didSet { fieldChanged() } }
+    var heroImage = ""          { didSet { fieldChanged() } }
     var pendingHeroImage: PendingImage?
     var pendingAction: EditorAction?
     var createdAt: Date? {
         didSet {
-            scheduleAutosave()
-            guard !isPopulating, let created = createdAt, let updated = updatedAt, created > updated else { return }
-            updatedAt = created
+            if !isPopulating, let created = createdAt, let updated = updatedAt, created > updated {
+                updatedAt = created
+            }
+            fieldChanged()
         }
     }
     var updatedAt: Date?
+    
+    /// The post's content on the server, the baseline for Show Changes.
     private(set) var serverContent = ""
     
-    var estimatedReadingTime: Int {
-        max(1, Int(ceil(Double(content.split(separator: " ").count) / 200.0)))
-    }
+    /// Whether a file has been uploaded under this post's ID. A new post's ID can't change after that, or the files would be left behind under the old one.
+    private(set) var hasUploadedFiles = false
+    
+    let draftSession: DraftSession<PostDraft>
+    
+    @ObservationIgnored private let repo: any PostRepositoryProtocol
+    @ObservationIgnored private let mediaRepo: any MediaRepositoryProtocol
+    @ObservationIgnored private var isPopulating = false
+    @ObservationIgnored private var serverUpdatedAt: Date?
+    @ObservationIgnored private var serverHeroImage = ""
     
     // MARK: - Init
     
-    init(mode: Mode) {
+    init(
+        mode: Mode,
+        repo: any PostRepositoryProtocol = PostRepository(),
+        mediaRepo: any MediaRepositoryProtocol = MediaRepository(),
+        drafts: DraftStore = .live
+    ) {
         self.mode = mode
+        self.repo = repo
+        self.mediaRepo = mediaRepo
+        self.draftSession = DraftSession(key: Self.draftKey(for: mode), store: drafts)
     }
     
-    private let repo = PostRepository()
-    private let mediaRepo = MediaRepository()
-    private var autosaveTask: Task<Void, Never>?
-    private var isPopulating = false
+    // MARK: - Computed Properties
     
-    // MARK: - Actions
-    
-    func load() async {
-        guard case let .edit(id) = mode else {
-            // Create mode: restore any in-progress draft.
-            if let draft = DraftStore.load(PostDraft.self, key: draftKey) {
-                isPopulating = true
-                populateFromDraft(draft)
-                isPopulating = false
-                hasDraft = true
-            }
-            return
-        }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let detail = try await repo.fetchPost(withId: id)
-            isPopulating = true
-            populate(from: detail)
-            // Restore draft on top of server data — user's unsynced work takes priority.
-            if let draft = DraftStore.load(PostDraft.self, key: draftKey) {
-                populateFromDraft(draft)
-                hasDraft = true
-            }
-            isPopulating = false
-        } catch {
-            isPopulating = false
-            if !error.isCancellation { self.error = error }
-        }
-    }
-    
-    func save() async {
-        isSaving = true
-        defer { isSaving = false }
-        let keyBeforeSave = draftKey  // Capture before mode may change (create → edit)
-        do {
-            if let pending = pendingHeroImage {
-                let url = try await mediaRepo.upload(
-                    fileData: pending.data,
-                    fileName: "\(UUID().uuidString).\(pending.ext)",
-                    mimeType: pending.mimeType,
-                    context: .posts,
-                    id: currentID
-                )
-                heroImage = url
-                pendingHeroImage = nil
-            }
-            switch mode {
-            case .create:
-                let detail = buildDetail()
-                let created = try await repo.createPost(detail)
-                mode = .edit(id: created.id)
-                isPopulating = true
-                populate(from: created)
-                isPopulating = false
-                saved = created.preview
-            case let .edit(id):
-                let fields = buildUpdate()
-                let updated = try await repo.updatePost(id: id, fields: fields)
-                isPopulating = true
-                populate(from: updated)
-                isPopulating = false
-                saved = updated.preview
-            }
-            DraftStore.clear(key: keyBeforeSave)
-            hasDraft = false
-        } catch {
-            self.error = error
-        }
-    }
-    
-    func delete() async {
-        guard case let .edit(id) = mode else { return }
-        isSaving = true
-        defer { isSaving = false }
-        do {
-            try await repo.deletePost(id: id)
-            DraftStore.clear(key: draftKey)
-            deleted = true
-        } catch {
-            self.error = error
-        }
-    }
-    
-    func discardDraft() {
-        DraftStore.clear(key: draftKey)
-        hasDraft = false
+    /// The ID the post is saved under: the slug typed in for a new post.
+    var currentID: String {
         switch mode {
-        case .create:
-            isPopulating = true
-            id = ""; title = ""; excerpt = ""; content = ""
-            tags = []; heroImage = ""; series = ""
-            pendingHeroImage = nil
-            isPopulating = false
-        case .edit:
-            Task { await load() }
+        case .create: id.slugified
+        case let .edit(editID): editID
         }
     }
     
-    func saveDraft() {
-        guard !isPopulating else { return }
-        let draft = PostDraft(
-            id: currentID,
+    /// Whether images can be uploaded yet. A new post needs an ID first, since uploads are stored under it.
+    var canUploadFiles: Bool {
+        !currentID.isEmpty
+    }
+    
+    var estimatedReadingTime: Int {
+        max(1, Int(ceil(Double(content.split(whereSeparator: \.isWhitespace).count) / 200.0)))
+    }
+    
+    var hasDraft: Bool {
+        draftSession.hasDraft
+    }
+    
+    /// Whether the restored draft was started from an older version of the post than the server's. Cleared once the user decides what to do with it.
+    var isDraftStale: Bool {
+        get { draftSession.isStale }
+        set { draftSession.isStale = newValue }
+    }
+    
+    static func draftKey(for mode: Mode) -> String {
+        switch mode {
+        case .create: "post-new"
+        case let .edit(id): "post-\(id)"
+        }
+    }
+    
+    private var currentDraft: PostDraft {
+        PostDraft(
+            id: id,
             title: title,
             excerpt: excerpt,
             content: content,
@@ -161,24 +112,109 @@ class PostEditorViewModel {
             heroImage: heroImage,
             series: series,
             createdAt: createdAt,
-            savedAt: Date()
+            serverUpdatedAt: serverUpdatedAt,
+            savedAt: .now
         )
-        DraftStore.save(draft, key: draftKey)
     }
     
-    // MARK: - Helpers
+    // MARK: - Actions
     
-    func uploadInlineImage(data: Data, mimeType: String, ext: String) async {
-        let postID = currentID
-        guard !postID.isEmpty else { return }
+    func load() async {
+        guard case let .edit(id) = mode else {
+            draftSession.setBaseline(currentDraft)
+            if let draft = draftSession.restore() { populate(fromDraft: draft) }
+            return
+        }
+        
+        isLoading = true
+        defer { isLoading = false }
+        
         do {
-            let path = try await mediaRepo.upload(
-                fileData: data,
-                fileName: "\(UUID().uuidString).\(ext)",
-                mimeType: mimeType,
-                context: .posts,
-                id: postID
-            )
+            let detail = try await repo.fetchPost(withId: id)
+            populate(from: detail)
+            draftSession.setBaseline(currentDraft)
+            // Unpublished changes take priority over the server's version.
+            if let draft = draftSession.restore() { populate(fromDraft: draft) }
+        } catch {
+            if !error.isCancellation { self.error = error }
+        }
+    }
+    
+    func save() async {
+        isSaving = true
+        defer { isSaving = false }
+        
+        do {
+            if let pendingHeroImage {
+                heroImage = try await upload(pendingHeroImage)
+                self.pendingHeroImage = nil
+            }
+            
+            let result: PostDetail
+            switch mode {
+            case .create:
+                result = try await repo.createPost(buildDetail())
+            case let .edit(id):
+                result = try await repo.updatePost(id: id, fields: buildUpdate())
+            }
+            
+            draftSession.discard()
+            
+            let previousHeroImage = serverHeroImage
+            mode = .edit(id: result.id)
+            draftSession.key = Self.draftKey(for: mode)
+            populate(from: result)
+            draftSession.setBaseline(currentDraft)
+            saved = result.preview
+            
+            try await mediaRepo.deleteUnusedFiles(previous: [previousHeroImage], current: [heroImage], text: content, context: .posts, id: result.id)
+        } catch {
+            self.error = error
+        }
+    }
+    
+    func delete() async {
+        guard case let .edit(id) = mode else { return }
+        
+        isSaving = true
+        defer { isSaving = false }
+        
+        do {
+            try await repo.deletePost(id: id)
+            draftSession.discard()
+            deleted = true
+        } catch {
+            self.error = error
+        }
+    }
+    
+    /// Deletes the draft and goes back to the version the editor loaded.
+    func discardDraft() {
+        draftSession.discard()
+        pendingHeroImage = nil
+        if let baseline = draftSession.baseline {
+            populate(fromDraft: baseline)
+        }
+    }
+    
+    /// Keeps a draft that was started from an older version of the post.
+    func keepStaleDraft() {
+        draftSession.isStale = false
+        draftSession.save(currentDraft)
+    }
+    
+    /// Saves the draft now, when the editor closes.
+    func saveDraftNow() {
+        guard !deleted else { return }
+        
+        draftSession.save(currentDraft)
+    }
+    
+    func uploadInlineImage(_ image: PendingImage) async {
+        guard canUploadFiles else { return }
+        
+        do {
+            let path = try await upload(image)
             pendingAction = .insertText("![](\(path))")
         } catch {
             self.error = error
@@ -189,33 +225,24 @@ class PostEditorViewModel {
         computeChangedLineRanges(from: serverContent, to: content)
     }
     
-    func scheduleAutosave() {
+    // MARK: - Helpers
+    
+    private func fieldChanged() {
         guard !isPopulating else { return }
-        autosaveTask?.cancel()
-        autosaveTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            self?.saveDraft()
-        }
+        
+        draftSession.scheduleSave(currentDraft)
     }
     
-    var currentID: String {
-        switch mode {
-        case .create:
-            return id.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-")
-        case let .edit(editID):
-            return editID
-        }
+    private func upload(_ image: PendingImage) async throws(APIError) -> String {
+        let path = try await mediaRepo.upload(image, context: .posts, id: currentID)
+        hasUploadedFiles = true
+        return path
     }
     
-    private var draftKey: String {
-        switch mode {
-        case .create: return "post-new"
-        case let .edit(id): return "post-\(id)"
-        }
-    }
-    
-    private func populateFromDraft(_ draft: PostDraft) {
+    private func populate(fromDraft draft: PostDraft) {
+        isPopulating = true
+        defer { isPopulating = false }
+        
         if case .create = mode { id = draft.id }
         title = draft.title
         excerpt = draft.excerpt
@@ -227,7 +254,12 @@ class PostEditorViewModel {
     }
     
     private func populate(from detail: PostDetail) {
+        isPopulating = true
+        defer { isPopulating = false }
+        
         serverContent = detail.content
+        serverUpdatedAt = detail.updatedAt
+        serverHeroImage = detail.heroImage ?? ""
         id = detail.id
         title = detail.title
         excerpt = detail.excerpt
@@ -243,12 +275,12 @@ class PostEditorViewModel {
     private func buildDetail() -> PostDetail {
         PostDetail(
             content: content,
-            id: id.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-"),
+            id: currentID,
             title: title,
             excerpt: excerpt,
             heroImage: heroImage.isEmpty ? nil : heroImage,
             tags: tags,
-            createdAt: Date(),
+            createdAt: createdAt ?? .now,
             updatedAt: nil,
             readingTime: estimatedReadingTime,
             series: series.isEmpty ? nil : series

@@ -1,6 +1,6 @@
 import Foundation
 
-struct PostPreview: Codable, Equatable {
+struct PostPreview: Codable, Equatable, Identifiable {
     var id: String
     var title: String
     var excerpt: String

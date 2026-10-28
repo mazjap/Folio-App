@@ -1,25 +1,28 @@
 import Foundation
 
-// MARK: - Partial update payload
+// MARK: - Update payload
 
-struct PostUpdate: Encodable {
-    var title: String?
-    var excerpt: String?
-    var content: String?
-    var tags: [String]?
+/// The fields the post editor saves.
+///
+/// The server merges an update into the stored post, so a field left out keeps its old value. Every field is sent, and a `nil` `heroImage` or `series` is sent as `null`, which clears it. Only `createdAt` is left out when `nil`.
+struct PostUpdate: Encodable, Equatable {
+    var title: String
+    var excerpt: String
+    var content: String
+    var tags: [String]
     var heroImage: String?
     var series: String?
     var createdAt: Date?
     
     func encode(to encoder: any Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encodeIfPresent(title, forKey: .title)
-        try c.encodeIfPresent(excerpt, forKey: .excerpt)
-        try c.encodeIfPresent(content, forKey: .content)
-        try c.encodeIfPresent(tags, forKey: .tags)
-        try c.encodeIfPresent(heroImage, forKey: .heroImage)
-        try c.encodeIfPresent(series, forKey: .series)
-        try c.encodeIfPresent(createdAt, forKey: .createdAt)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(title, forKey: .title)
+        try container.encode(excerpt, forKey: .excerpt)
+        try container.encode(content, forKey: .content)
+        try container.encode(tags, forKey: .tags)
+        try container.encode(heroImage, forKey: .heroImage)
+        try container.encode(series, forKey: .series)
+        try container.encodeIfPresent(createdAt, forKey: .createdAt)
     }
     
     enum CodingKeys: String, CodingKey {
@@ -41,51 +44,114 @@ protocol PostRepositoryProtocol {
 // MARK: - Implementation
 
 struct PostRepository: PostRepositoryProtocol {
-    private func processor() throws(APIError) -> URLProcessor {
-        try .fromSettings()
-    }
-    
-    private func postsURL(_ p: URLProcessor) -> URL {
-        p.baseURL.appending(path: "api").appending(path: "posts")
-    }
-    
     func fetchPosts() async throws(APIError) -> [PostPreview] {
-        let p = try processor()
-        let data = try await p.get(postsURL(p))
+        let p = try URLProcessor.fromSettings()
+        let data = try await p.get(p.apiURL("posts"))
         return try p.decode([PostPreview].self, from: data)
     }
     
     func fetchPostNavs() async throws(APIError) -> [PostNav] {
-        let p = try processor()
-        let url = postsURL(p).appending(path: "nav")
-        let data = try await p.get(url)
+        let p = try URLProcessor.fromSettings()
+        let data = try await p.get(p.apiURL("posts", "nav"))
         return try p.decode([PostNav].self, from: data)
     }
     
     func fetchPost(withId id: String) async throws(APIError) -> PostDetail {
-        let p = try processor()
-        let url = postsURL(p).appending(path: id)
-        let data = try await p.get(url)
+        let p = try URLProcessor.fromSettings()
+        let data = try await p.get(p.apiURL("posts", id))
         return try p.decode(PostDetail.self, from: data)
     }
     
     func createPost(_ post: PostDetail) async throws(APIError) -> PostDetail {
-        let p = try processor()
-        let body = try p.encode(post)
-        let data = try await p.post(postsURL(p), body: body)
+        let p = try URLProcessor.fromSettings()
+        let data = try await p.post(p.apiURL("posts"), body: try p.encode(post))
         return try p.decode(PostDetail.self, from: data)
     }
     
     func updatePost(id: String, fields: PostUpdate) async throws(APIError) -> PostDetail {
-        let p = try processor()
-        let url = postsURL(p).appending(path: id)
-        let body = try p.encode(fields)
-        let data = try await p.put(url, body: body)
+        let p = try URLProcessor.fromSettings()
+        let data = try await p.put(p.apiURL("posts", id), body: try p.encode(fields))
         return try p.decode(PostDetail.self, from: data)
     }
     
     func deletePost(id: String) async throws(APIError) {
-        let p = try processor()
-        try await p.delete(postsURL(p).appending(path: id))
+        let p = try URLProcessor.fromSettings()
+        try await p.delete(p.apiURL("posts", id))
     }
+}
+
+// MARK: - Test fake
+
+/// Keeps posts in memory and merges updates the way the server does, for tests and previews.
+final class TestPostRepository: PostRepositoryProtocol {
+    var posts: [PostDetail]
+    /// When set, `fetchPost(withId:)` throws it.
+    var fetchError: APIError?
+    /// The `updatedAt` the "server" gives an updated post.
+    var updateDate = Date.sampleDate.addingTimeInterval(3600)
+    private(set) var updates: [(id: String, fields: PostUpdate)] = []
+    private(set) var deletedIDs: [String] = []
+    
+    init(posts: [PostDetail] = [.sample]) {
+        self.posts = posts
+    }
+    
+    func fetchPosts() async throws(APIError) -> [PostPreview] {
+        posts.map(\.preview)
+    }
+    
+    func fetchPostNavs() async throws(APIError) -> [PostNav] {
+        posts.map(\.nav)
+    }
+    
+    func fetchPost(withId id: String) async throws(APIError) -> PostDetail {
+        if let fetchError { throw fetchError }
+        guard let post = posts.first(where: { $0.id == id }) else { throw .notFound }
+        
+        return post
+    }
+    
+    func createPost(_ post: PostDetail) async throws(APIError) -> PostDetail {
+        guard !posts.contains(where: { $0.id == post.id }) else { throw .conflict }
+        
+        posts.append(post)
+        return post
+    }
+    
+    func updatePost(id: String, fields: PostUpdate) async throws(APIError) -> PostDetail {
+        guard let index = posts.firstIndex(where: { $0.id == id }) else { throw .notFound }
+        
+        updates.append((id, fields))
+        posts[index].title = fields.title
+        posts[index].excerpt = fields.excerpt
+        posts[index].content = fields.content
+        posts[index].tags = fields.tags
+        posts[index].heroImage = fields.heroImage
+        posts[index].series = fields.series
+        posts[index].createdAt = fields.createdAt ?? posts[index].createdAt
+        posts[index].updatedAt = updateDate
+        return posts[index]
+    }
+    
+    func deletePost(id: String) async throws(APIError) {
+        guard posts.contains(where: { $0.id == id }) else { throw .notFound }
+        
+        posts.removeAll { $0.id == id }
+        deletedIDs.append(id)
+    }
+}
+
+extension PostDetail {
+    static let sample = PostDetail(
+        content: "# Hello\n\nThis is a sample post.\n\n![](/media/posts/sample-post/inline.webp)",
+        id: "sample-post",
+        title: "Sample Post",
+        excerpt: "A post for previews and tests.",
+        heroImage: "/media/posts/sample-post/hero.webp",
+        tags: ["swift", "swiftui"],
+        createdAt: .sampleDate,
+        updatedAt: .sampleDate,
+        readingTime: 1,
+        series: "Samples"
+    )
 }

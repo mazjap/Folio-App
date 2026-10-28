@@ -11,41 +11,54 @@ class AppDetailViewModel {
     var isLoading = false
     
     let appId: String
-    private let repo = AppsRepository()
+    @ObservationIgnored private let repo: any AppsRepositoryProtocol
     
-    init(appId: String) { self.appId = appId }
+    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository()) {
+        self.appId = appId
+        self.repo = repo
+    }
     
     func load() async {
         isLoading = true
-        privacyPolicyMissing = false; supportMissing = false
-        privacyPolicyFailed = false; supportFailed = false
+        privacyPolicyMissing = false
+        supportMissing = false
+        privacyPolicyFailed = false
+        supportFailed = false
         defer { isLoading = false }
         
         do {
             privacyPolicy = try await repo.fetchPrivacyPolicy(appId: appId)
         } catch {
             privacyPolicy = nil
-            if case .notFound = error { privacyPolicyMissing = true }
-            else if !error.isCancellation { privacyPolicyFailed = true }
+            if case .notFound = error {
+                privacyPolicyMissing = true
+            } else if !error.isCancellation {
+                privacyPolicyFailed = true
+            }
         }
         
         do {
             support = try await repo.fetchSupport(appId: appId)
         } catch {
             support = nil
-            if case .notFound = error { supportMissing = true }
-            else if !error.isCancellation { supportFailed = true }
+            if case .notFound = error {
+                supportMissing = true
+            } else if !error.isCancellation {
+                supportFailed = true
+            }
         }
     }
 }
 
 struct AppDetailView: View {
-    let appId: String
     @State private var vm: AppDetailViewModel
+    private let appId: String
+    private let repo: any AppsRepositoryProtocol
     
-    init(appId: String) {
+    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository()) {
+        self._vm = State(initialValue: AppDetailViewModel(appId: appId, repo: repo))
         self.appId = appId
-        self._vm = State(initialValue: AppDetailViewModel(appId: appId))
+        self.repo = repo
     }
     
     var body: some View {
@@ -57,6 +70,7 @@ struct AppDetailView: View {
                     NavigationLink {
                         AppPrivacyPolicyEditorView(
                             appId: appId,
+                            repo: repo,
                             existing: policy,
                             onSave: { vm.privacyPolicy = $0 },
                             onDelete: { vm.privacyPolicy = nil; vm.privacyPolicyMissing = true }
@@ -73,6 +87,7 @@ struct AppDetailView: View {
                     NavigationLink {
                         AppPrivacyPolicyEditorView(
                             appId: appId,
+                            repo: repo,
                             existing: nil,
                             onSave: { vm.privacyPolicy = $0; vm.privacyPolicyMissing = false },
                             onDelete: {}
@@ -94,6 +109,7 @@ struct AppDetailView: View {
                     NavigationLink {
                         AppSupportEditorView(
                             appId: appId,
+                            repo: repo,
                             existing: support,
                             onSave: { vm.support = $0 },
                             onDelete: { vm.support = nil; vm.supportMissing = true }
@@ -110,6 +126,7 @@ struct AppDetailView: View {
                     NavigationLink {
                         AppSupportEditorView(
                             appId: appId,
+                            repo: repo,
                             existing: nil,
                             onSave: { vm.support = $0; vm.supportMissing = false },
                             onDelete: {}
@@ -134,5 +151,11 @@ struct AppDetailView: View {
                 .disabled(vm.isLoading)
             }
         }
+    }
+}
+
+#Preview {
+    NavigationStack {
+        AppDetailView(appId: AppPrivacyPolicy.sample.id, repo: TestAppsRepository())
     }
 }

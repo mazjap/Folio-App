@@ -6,7 +6,7 @@ enum ProjectStatus: String, Codable {
     case archived
 }
 
-struct ProjectPreview: Codable, Equatable {
+struct ProjectPreview: Codable, Equatable, Identifiable {
     var id: String
     var title: String
     var tagline: String

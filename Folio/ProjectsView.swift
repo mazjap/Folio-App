@@ -1,49 +1,59 @@
 import SwiftUI
 
 struct ProjectsView: View {
-    @State private var vm = ProjectsViewModel()
-    @State private var isCreatingNew = false
-    @State private var didLoad = false
-    @State private var selectedProjectID: String?
+    @State private var vm: ProjectsViewModel
+    private let repo: any ProjectRepositoryProtocol
+    private let mediaRepo: any MediaRepositoryProtocol
+    private let drafts: DraftStore
+    
+    init(
+        repo: any ProjectRepositoryProtocol = ProjectRepository(),
+        mediaRepo: any MediaRepositoryProtocol = MediaRepository(),
+        drafts: DraftStore = .live
+    ) {
+        self._vm = State(initialValue: ProjectsViewModel(repo: repo, drafts: drafts))
+        self.repo = repo
+        self.mediaRepo = mediaRepo
+        self.drafts = drafts
+    }
     
     var body: some View {
         NavigationStack {
-            List(selection: $selectedProjectID) {
-                if vm.isLoading && vm.projects.isEmpty {
+            List(selection: $vm.selectedID) {
+                if vm.isLoading && vm.items.isEmpty {
                     ProgressView()
                 } else {
-                    ForEach(vm.projects, id: \.id) { project in
+                    ForEach(vm.items) { project in
                         ProjectListRow(project: project)
                             .tag(project.id)
                             .contextMenu {
                                 Button("Delete", role: .destructive) {
-                                    Task { await vm.deleteProject(id: project.id) }
+                                    Task { await vm.delete(id: project.id) }
                                 }
                             }
                     }
                     .onDelete { indexSet in
-                        for i in indexSet {
-                            let id = vm.projects[i].id
-                            Task { await vm.deleteProject(id: id) }
+                        for id in indexSet.map({ vm.items[$0].id }) {
+                            Task { await vm.delete(id: id) }
                         }
                     }
                 }
             }
             .navigationTitle("Projects")
-            .refreshable { await vm.fetchProjects() }
-            .navigationDestination(item: $selectedProjectID) { id in
+            .refreshable { await vm.refresh() }
+            .navigationDestination(item: $vm.selectedID) { id in
                 ProjectFormView(
-                    vm: ProjectFormViewModel(mode: .edit(id: id)),
+                    vm: ProjectFormViewModel(mode: .edit(id: id), repo: repo, mediaRepo: mediaRepo, drafts: drafts),
                     onSave: { preview in vm.appendOrReplace(preview) },
-                    onDelete: { vm.projects.removeAll { $0.id == id } }
+                    onDelete: { vm.remove(id: id) }
                 )
             }
-            .navigationDestination(isPresented: $isCreatingNew) {
+            .navigationDestination(isPresented: $vm.isCreatingNew) {
                 ProjectFormView(
-                    vm: ProjectFormViewModel(mode: .create),
+                    vm: ProjectFormViewModel(mode: .create, repo: repo, mediaRepo: mediaRepo, drafts: drafts),
                     onSave: { preview in
                         vm.appendOrReplace(preview)
-                        isCreatingNew = false
+                        vm.isCreatingNew = false
                     },
                     onDelete: {}
                 )
@@ -51,36 +61,24 @@ struct ProjectsView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button("New Project", systemImage: "plus") {
-                        selectedProjectID = nil
-                        isCreatingNew = true
+                        vm.startCreating()
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button("Refresh", systemImage: "arrow.clockwise") {
-                        Task { await vm.fetchProjects() }
+                        Task { await vm.refresh() }
                     }
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(vm.isLoading)
                 }
             }
         }
-        .onDisappear { selectedProjectID = nil }
-        .task {
-            guard !didLoad else { return }
-            didLoad = true
-            await vm.fetchProjects()
-        }
-        .alert("Error", isPresented: Binding(
-            get: { vm.error != nil },
-            set: { if !$0 { vm.error = nil } }
-        )) {
-            Button("OK", role: .cancel) { vm.error = nil }
-        } message: {
-            Text(vm.error?.localizedDescription ?? "")
-        }
+        .onDisappear { vm.clearSelection() }
+        .task { await vm.loadIfNeeded() }
+        .errorAlert($vm.error)
     }
 }
 
 #Preview {
-    ProjectsView()
+    ProjectsView(repo: TestProjectRepository(), mediaRepo: TestMediaRepository(), drafts: .temporary())
 }

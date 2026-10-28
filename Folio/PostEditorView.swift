@@ -1,13 +1,11 @@
 import SwiftUI
-import PhotosUI
-import UniformTypeIdentifiers
 import Textual
 
 struct PostEditorView: View {
     @Environment(\.dismiss) private var dismiss
-    @State var vm: PostEditorViewModel
-    var onSave: (PostPreview) -> Void
-    var onDelete: () -> Void
+    @State private var vm: PostEditorViewModel
+    private let onSave: (PostPreview) -> Void
+    private let onDelete: () -> Void
     
     @State private var showInspector = true
     @State private var showPreview = false
@@ -15,8 +13,12 @@ struct PostEditorView: View {
     @State private var showDiscardDraftConfirm = false
     @State private var showDiff = false
     @State private var diffRanges: [NSRange] = []
-    @State private var heroPickerItem: PhotosPickerItem?
-    @State private var inlinePickerItem: PhotosPickerItem?
+    
+    init(vm: PostEditorViewModel, onSave: @escaping (PostPreview) -> Void, onDelete: @escaping () -> Void) {
+        self._vm = State(initialValue: vm)
+        self.onSave = onSave
+        self.onDelete = onDelete
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -30,34 +32,32 @@ struct PostEditorView: View {
             inspectorContent
         }
         .task { await vm.load() }
-        .onDisappear { if !vm.deleted { vm.saveDraft() } }
+        .onDisappear { vm.saveDraftNow() }
         .onChange(of: showDiff) {
             diffRanges = showDiff ? vm.computeDiffRanges() : []
         }
         .onChange(of: vm.content) {
             guard showDiff else { return }
+            
             diffRanges = vm.computeDiffRanges()
         }
         .onChange(of: vm.hasDraft) {
-            if !vm.hasDraft { showDiff = false; diffRanges = [] }
+            if !vm.hasDraft {
+                showDiff = false
+                diffRanges = []
+            }
         }
         .onChange(of: vm.saved) { _, preview in
             if let preview { onSave(preview) }
         }
-        .onChange(of: vm.deleted) { _, gone in
-            if gone {
+        .onChange(of: vm.deleted) { _, isDeleted in
+            if isDeleted {
                 onDelete()
                 dismiss()
             }
         }
-        .alert("Error", isPresented: Binding(
-            get: { vm.error != nil },
-            set: { if !$0 { vm.error = nil } }
-        )) {
-            Button("OK", role: .cancel) { vm.error = nil }
-        } message: {
-            Text(vm.error?.localizedDescription ?? "")
-        }
+        .errorAlert($vm.error)
+        .staleDraftAlert(isPresented: $vm.isDraftStale, itemKind: "post", onKeep: vm.keepStaleDraft, onDiscard: vm.discardDraft)
         .confirmationDialog("Delete \"\(vm.title)\"?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}
@@ -81,6 +81,7 @@ struct PostEditorView: View {
                 .padding(.horizontal)
                 .padding(.top, 12)
                 .padding(.bottom, 6)
+            
             if case .create = vm.mode {
                 TextField("id-slug", text: $vm.id)
                     .font(.caption)
@@ -91,7 +92,10 @@ struct PostEditorView: View {
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     #endif
+                    .disabled(vm.hasUploadedFiles)
+                    .help(vm.hasUploadedFiles ? "Images are uploaded under this ID, so it can't change." : "")
             }
+            
             TextField("Excerpt — shown in the post list", text: $vm.excerpt, axis: .vertical)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -113,82 +117,16 @@ struct PostEditorView: View {
                     .padding()
             }
         } else {
-            editorWithToolbar
-        }
-    }
-    
-    private var editorWithToolbar: some View {
-        VStack(spacing: 0) {
-            markdownToolbar
-            Divider()
-            MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction, highlightRanges: (showDiff && vm.hasDraft) ? diffRanges : [])
-        }
-    }
-    
-    // MARK: - Markdown toolbar
-    
-    private var markdownToolbar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                markdownButton(label: "B", title: "Bold") { vm.pendingAction = .wrap(prefix: "**", suffix: "**", placeholder: "text") }
-                markdownButton(label: "I", title: "Italic") { vm.pendingAction = .wrap(prefix: "_", suffix: "_", placeholder: "text") }
-                markdownButton(label: "` `", title: "Code") { vm.pendingAction = .wrap(prefix: "`", suffix: "`", placeholder: "code") }
-                Divider().frame(height: 20)
-                markdownButton(label: "H1", title: "Heading 1") { vm.pendingAction = .prependLine("# ") }
-                markdownButton(label: "H2", title: "Heading 2") { vm.pendingAction = .prependLine("## ") }
-                markdownButton(label: "H3", title: "Heading 3") { vm.pendingAction = .prependLine("### ") }
-                Divider().frame(height: 20)
-                markdownButton(label: "—", title: "Horizontal Rule") { vm.pendingAction = .insertText("\n\n---\n\n") }
-                markdownButton(label: "[ ]", title: "Link") { vm.pendingAction = .wrap(prefix: "[", suffix: "](url)", placeholder: "text") }
-                Divider().frame(height: 20)
-                PhotosPicker(selection: $inlinePickerItem, matching: .images) {
-                    Text("![ ]")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
-                .help("Insert Image from Photos")
-                .onChange(of: inlinePickerItem) { _, item in
-                    guard let item else { return }
-                    Task {
-                        await loadInlineFromPicker(item)
-                        inlinePickerItem = nil
+            VStack(spacing: 0) {
+                MarkdownToolbar(pendingAction: $vm.pendingAction) {
+                    InsertImageButtons(isEnabled: vm.canUploadFiles) { image in
+                        await vm.uploadInlineImage(image)
                     }
                 }
-                #if os(macOS)
-                Button(action: {
-                    let panel = NSOpenPanel()
-                    panel.allowedContentTypes = [.image]
-                    panel.allowsMultipleSelection = false
-                    guard panel.runModal() == .OK, let url = panel.url else { return }
-                    Task { await loadInlineFromFileURL(url) }
-                }) {
-                    Label("Image from Files", systemImage: "folder")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
-                .help("Insert Image from Files")
-                #endif
+                Divider()
+                MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction, highlightRanges: (showDiff && vm.hasDraft) ? diffRanges : [])
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
         }
-        .background(.bar)
-    }
-    
-    private func markdownButton(label: String, title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-        }
-        .buttonStyle(.plain)
-        .help(title)
     }
     
     // MARK: - Toolbar
@@ -199,7 +137,7 @@ struct PostEditorView: View {
             Button("Publish", systemImage: "square.and.arrow.up") {
                 Task { await vm.save() }
             }
-            .disabled(vm.title.isEmpty || vm.isSaving)
+            .disabled(vm.title.isEmpty || vm.currentID.isEmpty || vm.isSaving)
             .keyboardShortcut("s", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -242,7 +180,7 @@ struct PostEditorView: View {
     private var inspectorContent: some View {
         Form {
             Section("Hero Image") {
-                heroImageRow
+                HeroImageRow(heroImage: $vm.heroImage, pendingHeroImage: $vm.pendingHeroImage, uploadsOn: "publish")
             }
             
             Section("Metadata") {
@@ -255,7 +193,7 @@ struct PostEditorView: View {
                     DatePicker(
                         "Published",
                         selection: Binding(
-                            get: { vm.createdAt ?? Date() },
+                            get: { vm.createdAt ?? .now },
                             set: { vm.createdAt = $0 }
                         ),
                         displayedComponents: .date
@@ -281,103 +219,17 @@ struct PostEditorView: View {
         .navigationTitle("Inspector")
         .inspectorColumnWidth(min: 200, ideal: 240, max: 320)
     }
-    
-    @ViewBuilder
-    private var heroImageRow: some View {
-        if vm.pendingHeroImage != nil {
-            Label("Image selected · uploads on publish", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.callout)
-        } else if let heroURL = mediaURL(for: vm.heroImage) {
-            AsyncImage(url: heroURL) { image in
-                image.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Color.secondary.opacity(0.15)
-            }
-            .frame(height: 80)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        let hasHeroImage = vm.pendingHeroImage != nil || !vm.heroImage.isEmpty
-        
-        HStack(spacing: 8) {
-            PhotosPicker(selection: $heroPickerItem, matching: .images) {
-                Label(
-                    hasHeroImage ? "Change Image" : "Set Hero Image",
-                    systemImage: "photo.badge.plus"
-                )
-            }
-            .onChange(of: heroPickerItem) { _, item in
-                guard let item else { return }
-                Task { await loadHeroFromPicker(item) }
-            }
-            if hasHeroImage {
-                Spacer()
-                Button("Clear", role: .destructive) {
-                    vm.pendingHeroImage = nil
-                    vm.heroImage = ""
-                    heroPickerItem = nil
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.red)
-            }
-        }
-        #if os(macOS)
-        Button("Select from Files…") {
-            let panel = NSOpenPanel()
-            panel.allowedContentTypes = [.image]
-            panel.allowsMultipleSelection = false
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            loadHeroFromFileURL(url)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.tint)
-        #endif
-    }
-    
-    // MARK: - Image upload helpers
-    
-    private func loadHeroFromPicker(_ item: PhotosPickerItem) async {
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-        let utType = item.supportedContentTypes.first
-        let mimeType = utType?.preferredMIMEType ?? "image/jpeg"
-        let ext = utType?.preferredFilenameExtension ?? "jpg"
-        vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
-        heroPickerItem = nil
-    }
-    
-    private func loadInlineFromPicker(_ item: PhotosPickerItem) async {
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-        let utType = item.supportedContentTypes.first
-        let mimeType = utType?.preferredMIMEType ?? "image/jpeg"
-        let ext = utType?.preferredFilenameExtension ?? "jpg"
-        await vm.uploadInlineImage(data: data, mimeType: mimeType, ext: ext)
-    }
-    
-    private func loadHeroFromFileURL(_ url: URL) {
-        guard url.startAccessingSecurityScopedResource() else { return }
-        defer { url.stopAccessingSecurityScopedResource() }
-        guard let data = try? Data(contentsOf: url) else { return }
-        let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
-        let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-        vm.pendingHeroImage = PendingImage(data: data, mimeType: mimeType, ext: ext)
-    }
-    
-    private func loadInlineFromFileURL(_ url: URL) async {
-        guard url.startAccessingSecurityScopedResource() else { return }
-        defer { url.stopAccessingSecurityScopedResource() }
-        guard let data = try? Data(contentsOf: url) else { return }
-        let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
-        let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-        await vm.uploadInlineImage(data: data, mimeType: mimeType, ext: ext)
-    }
-
 }
 
 // MARK: - Tags field
 
 private struct TagsField: View {
-    @Binding var tags: [String]
+    @Binding private var tags: [String]
     @State private var newTag = ""
+    
+    init(tags: Binding<[String]>) {
+        self._tags = tags
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -414,6 +266,7 @@ private struct TagsField: View {
     private func addTag() {
         let trimmed = newTag.trimmingCharacters(in: .whitespaces).lowercased()
         guard !trimmed.isEmpty, !tags.contains(trimmed) else { return }
+        
         tags.append(trimmed)
         newTag = ""
     }
@@ -425,7 +278,7 @@ private struct FlowLayout: Layout {
     var spacing: CGFloat
     
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        // Return the proposed width unchanged — returning anything else tells the parent
+        // NOTE: - Return the proposed width unchanged. Returning anything else tells the parent
         // to re-offer a different width, which changes row counts, which changes the size
         // again, producing an infinite constraint loop on macOS.
         let availableWidth = proposal.replacingUnspecifiedDimensions().width
@@ -468,5 +321,15 @@ private struct FlowLayout: Layout {
             rows[rows.count - 1].append(subview)
         }
         return rows
+    }
+}
+
+#Preview {
+    NavigationStack {
+        PostEditorView(
+            vm: PostEditorViewModel(mode: .edit(id: PostDetail.sample.id), repo: TestPostRepository(), mediaRepo: TestMediaRepository(), drafts: .temporary()),
+            onSave: { _ in },
+            onDelete: {}
+        )
     }
 }

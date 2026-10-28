@@ -1,7 +1,11 @@
 import SwiftUI
 
 struct ProjectListRow: View {
-    let project: ProjectPreview
+    private let project: ProjectPreview
+    
+    init(project: ProjectPreview) {
+        self.project = project
+    }
     
     var body: some View {
         HStack(spacing: 12) {
@@ -42,7 +46,11 @@ struct ProjectListRow: View {
 }
 
 struct ProjectStatusBadge: View {
-    let status: ProjectStatus
+    private let status: ProjectStatus
+    
+    init(status: ProjectStatus) {
+        self.status = status
+    }
     
     var body: some View {
         Text(label)
@@ -56,17 +64,23 @@ struct ProjectStatusBadge: View {
     
     private var label: String {
         switch status {
-        case .active: return "Active"
-        case .inProgress: return "In Progress"
-        case .archived: return "Archived"
+        case .active: "Active"
+        case .inProgress: "In Progress"
+        case .archived: "Archived"
         }
     }
     
     private var color: Color {
         switch status {
-        case .active: return .green
-        case .inProgress: return .orange
-        case .archived: return .secondary
+        case .active: .green
+        case .inProgress: .orange
+        case .archived: .secondary
         }
+    }
+}
+
+#Preview {
+    List {
+        ProjectListRow(project: ProjectDetail.sample.preview)
     }
 }

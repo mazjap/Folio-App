@@ -4,152 +4,109 @@ import Foundation
 class ProjectFormViewModel {
     // MARK: - State
     
-    enum Mode { case create, edit(id: String) }
+    enum Mode: Equatable {
+        case create
+        case edit(id: String)
+    }
     
     var mode: Mode
     var isLoading = false
     var isSaving = false
+    var isUploadingMedia = false
     var error: APIError?
     var saved: ProjectPreview?
     var deleted = false
-    var hasDraft = false
     
     // MARK: - Form fields
-    // didSet schedules a debounced draft save on every field change.
+    // Each change schedules a draft save.
     
-    var id = ""                     { didSet { scheduleAutosave() } }
-    var title = ""                  { didSet { scheduleAutosave() } }
-    var tagline = ""                { didSet { scheduleAutosave() } }
-    var category = ""               { didSet { scheduleAutosave() } }
-    var status = ProjectStatus.active { didSet { scheduleAutosave() } }
-    var featured = false            { didSet { scheduleAutosave() } }
-    var description = ""            { didSet { scheduleAutosave() } }
-    var techStack: [String] = []    { didSet { scheduleAutosave() } }
-    var links: [String: String] = [:] { didSet { scheduleAutosave() } }
-    var heroImage = ""
+    var id = ""                         { didSet { fieldChanged() } }
+    var title = ""                      { didSet { fieldChanged() } }
+    var tagline = ""                    { didSet { fieldChanged() } }
+    var category = ""                   { didSet { fieldChanged() } }
+    var status = ProjectStatus.active   { didSet { fieldChanged() } }
+    var featured = false                { didSet { fieldChanged() } }
+    var description = ""                { didSet { fieldChanged() } }
+    var techStack: [String] = []        { didSet { fieldChanged() } }
+    var links: [String: String] = [:]   { didSet { fieldChanged() } }
+    var media: [MediaItem] = []         { didSet { fieldChanged() } }
+    var heroImage = ""                  { didSet { fieldChanged() } }
     var pendingHeroImage: PendingImage?
     var pendingDescriptionAction: EditorAction?
-    var media: [MediaItem] = []
     var createdAt: Date? {
         didSet {
-            scheduleAutosave()
-            guard !isPopulating, let created = createdAt, let updated = updatedAt, created > updated else { return }
-            updatedAt = created
+            if !isPopulating, let created = createdAt, let updated = updatedAt, created > updated {
+                updatedAt = created
+            }
+            fieldChanged()
         }
     }
     var updatedAt: Date?
+    
+    /// The project's description on the server, the baseline for Show Changes.
     private(set) var serverDescription = ""
+    
+    /// Whether a file has been uploaded under this project's ID. A new project's ID can't change after that, or the files would be left behind under the old one.
+    private(set) var hasUploadedFiles = false
+    
+    let draftSession: DraftSession<ProjectDraft>
+    
+    @ObservationIgnored private let repo: any ProjectRepositoryProtocol
+    @ObservationIgnored private let mediaRepo: any MediaRepositoryProtocol
+    @ObservationIgnored private var isPopulating = false
+    @ObservationIgnored private var serverUpdatedAt: Date?
+    @ObservationIgnored private var serverHeroImage = ""
+    @ObservationIgnored private var serverMedia: [MediaItem] = []
     
     // MARK: - Init
     
-    init(mode: Mode) {
+    init(
+        mode: Mode,
+        repo: any ProjectRepositoryProtocol = ProjectRepository(),
+        mediaRepo: any MediaRepositoryProtocol = MediaRepository(),
+        drafts: DraftStore = .live
+    ) {
         self.mode = mode
+        self.repo = repo
+        self.mediaRepo = mediaRepo
+        self.draftSession = DraftSession(key: Self.draftKey(for: mode), store: drafts)
     }
     
-    private let repo = ProjectRepository()
-    private let mediaRepo = MediaRepository()
-    private var autosaveTask: Task<Void, Never>?
-    private var isPopulating = false
+    // MARK: - Computed Properties
     
-    // MARK: - Actions
-    
-    func load() async {
-        guard case let .edit(id) = mode else {
-            if let draft = DraftStore.load(ProjectDraft.self, key: draftKey) {
-                isPopulating = true
-                populateFromDraft(draft)
-                isPopulating = false
-                hasDraft = true
-            }
-            return
-        }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let detail = try await repo.fetchProject(withId: id)
-            isPopulating = true
-            populate(from: detail)
-            if let draft = DraftStore.load(ProjectDraft.self, key: draftKey) {
-                populateFromDraft(draft)
-                hasDraft = true
-            }
-            isPopulating = false
-        } catch {
-            isPopulating = false
-            if !error.isCancellation { self.error = error }
-        }
-    }
-    
-    func save() async {
-        isSaving = true
-        defer { isSaving = false }
-        let keyBeforeSave = draftKey
-        do {
-            if let pending = pendingHeroImage {
-                let url = try await mediaRepo.upload(
-                    fileData: pending.data,
-                    fileName: "\(UUID().uuidString).\(pending.ext)",
-                    mimeType: pending.mimeType,
-                    context: .projects,
-                    id: currentID
-                )
-                heroImage = url
-                pendingHeroImage = nil
-            }
-            switch mode {
-            case .create:
-                let detail = buildDetail()
-                let created = try await repo.createProject(detail)
-                mode = .edit(id: created.id)
-                saved = created.preview
-            case let .edit(id):
-                let fields = buildUpdate()
-                let updated = try await repo.updateProject(id: id, fields: fields)
-                isPopulating = true
-                populate(from: updated)
-                isPopulating = false
-                saved = updated.preview
-            }
-            DraftStore.clear(key: keyBeforeSave)
-            hasDraft = false
-        } catch {
-            self.error = error
-        }
-    }
-    
-    func delete() async {
-        guard case let .edit(id) = mode else { return }
-        isSaving = true
-        defer { isSaving = false }
-        do {
-            try await repo.deleteProject(id: id)
-            DraftStore.clear(key: draftKey)
-            deleted = true
-        } catch {
-            self.error = error
-        }
-    }
-    
-    func discardDraft() {
-        DraftStore.clear(key: draftKey)
-        hasDraft = false
+    /// The ID the project is saved under: the slug typed in for a new project.
+    var currentID: String {
         switch mode {
-        case .create:
-            isPopulating = true
-            id = ""; title = ""; tagline = ""; category = ""
-            status = .active; featured = false; description = ""
-            heroImage = ""; techStack = []; links = [:]
-            pendingHeroImage = nil
-            isPopulating = false
-        case .edit:
-            Task { await load() }
+        case .create: id.slugified
+        case let .edit(editID): editID
         }
     }
     
-    func saveDraft() {
-        guard !isPopulating else { return }
-        let draft = ProjectDraft(
-            id: currentID,
+    /// Whether images can be uploaded yet. A new project needs an ID first, since uploads are stored under it.
+    var canUploadFiles: Bool {
+        !currentID.isEmpty
+    }
+    
+    var hasDraft: Bool {
+        draftSession.hasDraft
+    }
+    
+    /// Whether the restored draft was started from an older version of the project than the server's. Cleared once the user decides what to do with it.
+    var isDraftStale: Bool {
+        get { draftSession.isStale }
+        set { draftSession.isStale = newValue }
+    }
+    
+    static func draftKey(for mode: Mode) -> String {
+        switch mode {
+        case .create: "project-new"
+        case let .edit(id): "project-\(id)"
+        }
+    }
+    
+    private var currentDraft: ProjectDraft {
+        ProjectDraft(
+            id: id,
             title: title,
             tagline: tagline,
             category: category,
@@ -159,25 +116,135 @@ class ProjectFormViewModel {
             heroImage: heroImage,
             techStack: techStack,
             links: links,
+            media: media,
             createdAt: createdAt,
-            savedAt: Date()
+            serverUpdatedAt: serverUpdatedAt,
+            savedAt: .now
         )
-        DraftStore.save(draft, key: draftKey)
     }
     
-    // MARK: - Helpers
+    // MARK: - Actions
     
-    func uploadInlineImageToDescription(data: Data, mimeType: String, ext: String) async {
-        let projectID = currentID
-        guard !projectID.isEmpty else { return }
+    func load() async {
+        guard case let .edit(id) = mode else {
+            draftSession.setBaseline(currentDraft)
+            if let draft = draftSession.restore() { populate(fromDraft: draft) }
+            return
+        }
+        
+        isLoading = true
+        defer { isLoading = false }
+        
         do {
-            let path = try await mediaRepo.upload(
-                fileData: data,
-                fileName: "\(UUID().uuidString).\(ext)",
-                mimeType: mimeType,
+            let detail = try await repo.fetchProject(withId: id)
+            populate(from: detail)
+            draftSession.setBaseline(currentDraft)
+            // Unpublished changes take priority over the server's version.
+            if let draft = draftSession.restore() { populate(fromDraft: draft) }
+        } catch {
+            if !error.isCancellation { self.error = error }
+        }
+    }
+    
+    func save() async {
+        isSaving = true
+        defer { isSaving = false }
+        
+        do {
+            if let pendingHeroImage {
+                heroImage = try await upload(pendingHeroImage)
+                self.pendingHeroImage = nil
+            }
+            
+            let result: ProjectDetail
+            switch mode {
+            case .create:
+                result = try await repo.createProject(buildDetail())
+            case let .edit(id):
+                result = try await repo.updateProject(id: id, fields: buildUpdate())
+            }
+            
+            draftSession.discard()
+            
+            let previousFiles = [serverHeroImage] + serverMedia.map(\.url)
+            mode = .edit(id: result.id)
+            draftSession.key = Self.draftKey(for: mode)
+            populate(from: result)
+            draftSession.setBaseline(currentDraft)
+            saved = result.preview
+            
+            try await mediaRepo.deleteUnusedFiles(
+                previous: previousFiles,
+                current: [heroImage] + media.map(\.url),
+                text: description,
                 context: .projects,
-                id: projectID
+                id: result.id
             )
+        } catch {
+            self.error = error
+        }
+    }
+    
+    func delete() async {
+        guard case let .edit(id) = mode else { return }
+        
+        isSaving = true
+        defer { isSaving = false }
+        
+        do {
+            try await repo.deleteProject(id: id)
+            draftSession.discard()
+            deleted = true
+        } catch {
+            self.error = error
+        }
+    }
+    
+    /// Deletes the draft and goes back to the version the editor loaded.
+    func discardDraft() {
+        draftSession.discard()
+        pendingHeroImage = nil
+        if let baseline = draftSession.baseline {
+            populate(fromDraft: baseline)
+        }
+    }
+    
+    /// Keeps a draft that was started from an older version of the project.
+    func keepStaleDraft() {
+        draftSession.isStale = false
+        draftSession.save(currentDraft)
+    }
+    
+    /// Saves the draft now, when the editor closes.
+    func saveDraftNow() {
+        guard !deleted else { return }
+        
+        draftSession.save(currentDraft)
+    }
+    
+    /// Uploads images to the gallery. They're removed from the server again if the project is saved without them.
+    func addMedia(_ images: [PendingImage]) async {
+        guard canUploadFiles else { return }
+        
+        isUploadingMedia = true
+        defer { isUploadingMedia = false }
+        
+        for image in images {
+            do {
+                let path = try await upload(image)
+                media.append(MediaItem(type: .image, url: path, caption: nil))
+            } catch {
+                self.error = error
+                return
+            }
+        }
+    }
+    
+    func uploadInlineImageToDescription(_ image: PendingImage) async {
+        guard canUploadFiles else { return }
+        
+        do {
+            let path = try await upload(image)
             pendingDescriptionAction = .insertText("![](\(path))")
         } catch {
             self.error = error
@@ -188,33 +255,24 @@ class ProjectFormViewModel {
         computeChangedLineRanges(from: serverDescription, to: description)
     }
     
-    func scheduleAutosave() {
+    // MARK: - Helpers
+    
+    private func fieldChanged() {
         guard !isPopulating else { return }
-        autosaveTask?.cancel()
-        autosaveTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            self?.saveDraft()
-        }
+        
+        draftSession.scheduleSave(currentDraft)
     }
     
-    var currentID: String {
-        switch mode {
-        case .create:
-            return id.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-")
-        case let .edit(editID):
-            return editID
-        }
+    private func upload(_ image: PendingImage) async throws(APIError) -> String {
+        let path = try await mediaRepo.upload(image, context: .projects, id: currentID)
+        hasUploadedFiles = true
+        return path
     }
     
-    private var draftKey: String {
-        switch mode {
-        case .create: return "project-new"
-        case let .edit(id): return "project-\(id)"
-        }
-    }
-    
-    private func populateFromDraft(_ draft: ProjectDraft) {
+    private func populate(fromDraft draft: ProjectDraft) {
+        isPopulating = true
+        defer { isPopulating = false }
+        
         if case .create = mode { id = draft.id }
         title = draft.title
         tagline = draft.tagline
@@ -225,11 +283,18 @@ class ProjectFormViewModel {
         heroImage = draft.heroImage
         techStack = draft.techStack
         links = draft.links
+        if let draftMedia = draft.media { media = draftMedia }
         if let draftCreatedAt = draft.createdAt { createdAt = draftCreatedAt }
     }
     
     private func populate(from detail: ProjectDetail) {
+        isPopulating = true
+        defer { isPopulating = false }
+        
         serverDescription = detail.description
+        serverUpdatedAt = detail.updatedAt
+        serverHeroImage = detail.heroImage
+        serverMedia = detail.media
         id = detail.id
         title = detail.title
         tagline = detail.tagline
@@ -248,14 +313,14 @@ class ProjectFormViewModel {
     
     private func buildDetail() -> ProjectDetail {
         ProjectDetail(
-            id: id.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-"),
+            id: currentID,
             title: title,
             tagline: tagline,
             heroImage: heroImage,
             category: category.isEmpty ? nil : category,
             status: status,
             featured: featured,
-            createdAt: Date(),
+            createdAt: createdAt ?? .now,
             updatedAt: nil,
             description: description,
             media: media,
@@ -269,7 +334,7 @@ class ProjectFormViewModel {
             title: title,
             tagline: tagline,
             description: description,
-            heroImage: heroImage.isEmpty ? nil : heroImage,
+            heroImage: heroImage,
             category: category.isEmpty ? nil : category,
             status: status,
             featured: featured,

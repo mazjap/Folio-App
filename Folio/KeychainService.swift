@@ -1,33 +1,36 @@
 import Foundation
 import Security
 
-// MARK: - Storage key constants
+// MARK: - Protocol
 
-enum FolioStorageKey {
-    static let activeEnvironment = "folio.activeEnvironment"
-    static let devBaseURL = "folio.dev.baseURL"
-    static let prodBaseURL = "folio.prod.baseURL"
-    static let devApiKey = "folio.dev.apiKey"
-    static let prodApiKey = "folio.prod.apiKey"
+protocol KeychainStoring {
+    func save(_ value: String, key: String) throws(KeychainService.KeychainError)
+    func read(key: String) -> String?
+    func delete(key: String)
 }
 
 // MARK: - Keychain
 
-enum KeychainService {
-    enum KeychainError: Error {
+struct KeychainService: KeychainStoring {
+    enum KeychainError: Error, LocalizedError, Equatable {
         case unexpectedStatus(OSStatus)
         case dataEncodingFailed
-        case dataDecodingFailed
+        
+        var errorDescription: String? {
+            switch self {
+            case let .unexpectedStatus(status):
+                let reason = SecCopyErrorMessageString(status, nil) as String? ?? "error \(status)"
+                return "The API key couldn't be saved to the Keychain: \(reason)."
+            case .dataEncodingFailed:
+                return "The API key couldn't be encoded."
+            }
+        }
     }
     
-    static func save(_ value: String, key: String) throws(KeychainError) {
+    func save(_ value: String, key: String) throws(KeychainError) {
         guard let data = value.data(using: .utf8) else { throw .dataEncodingFailed }
         
-        let deleteQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrAccount: key
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
+        delete(key: key)
         
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
@@ -39,7 +42,7 @@ enum KeychainService {
         guard status == errSecSuccess else { throw .unexpectedStatus(status) }
     }
     
-    static func read(key: String) -> String? {
+    func read(key: String) -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrAccount: key,
@@ -48,19 +51,44 @@ enum KeychainService {
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let string = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return string
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        
+        return String(data: data, encoding: .utf8)
     }
     
-    static func delete(key: String) {
+    func delete(key: String) {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrAccount: key
         ]
         SecItemDelete(query as CFDictionary)
+    }
+}
+
+// MARK: - Test fake
+
+/// An in-memory keychain for tests and previews.
+final class TestKeychain: KeychainStoring {
+    var values: [String: String]
+    /// When set, `save(_:key:)` throws it instead of saving.
+    var saveError: KeychainService.KeychainError?
+    
+    init(values: [String: String] = [:], saveError: KeychainService.KeychainError? = nil) {
+        self.values = values
+        self.saveError = saveError
+    }
+    
+    func save(_ value: String, key: String) throws(KeychainService.KeychainError) {
+        if let saveError { throw saveError }
+        
+        values[key] = value
+    }
+    
+    func read(key: String) -> String? {
+        values[key]
+    }
+    
+    func delete(key: String) {
+        values[key] = nil
     }
 }

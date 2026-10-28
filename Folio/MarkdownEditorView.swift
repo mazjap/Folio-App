@@ -63,17 +63,26 @@ struct MarkdownEditorView: NSViewRepresentable {
             context.coordinator.isUpdating = false
         }
         
-        // Clear the binding BEFORE mutating the text view so that the
-        // textDidChange → updateNSView re-entry sees nil and doesn't act again.
-        if let action = pendingAction {
-            pendingAction = nil
-            apply(action, to: textView)
+        if let action = pendingAction, !context.coordinator.isApplyingAction {
+            applyAfterUpdate(action, to: textView, coordinator: context.coordinator)
         }
         
         // Apply diff highlights only when the set of ranges actually changed.
         if context.coordinator.lastHighlightRanges != highlightRanges {
             context.coordinator.lastHighlightRanges = highlightRanges
             applyHighlights(highlightRanges, to: textView)
+        }
+    }
+    
+    /// Applies a toolbar action once the current view update finishes.
+    ///
+    /// > Warning: Applying it during the update would change the text binding (through the delegate) and clear `pendingAction` while SwiftUI is updating views, which it warns about and can loop on. `isApplyingAction` keeps later updates from applying the same action again before it's cleared.
+    private func applyAfterUpdate(_ action: EditorAction, to textView: NSTextView, coordinator: Coordinator) {
+        coordinator.isApplyingAction = true
+        Task { @MainActor in
+            apply(action, to: textView)
+            coordinator.parent.pendingAction = nil
+            coordinator.isApplyingAction = false
         }
     }
     
@@ -119,6 +128,7 @@ struct MarkdownEditorView: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownEditorView
         var isUpdating = false
+        var isApplyingAction = false
         var lastHighlightRanges: [NSRange] = []
         init(_ parent: MarkdownEditorView) { self.parent = parent }
         
@@ -148,17 +158,32 @@ struct MarkdownEditorView: UIViewRepresentable {
     }
     
     func updateUIView(_ tv: UITextView, context: Context) {
+        context.coordinator.parent = self
+        
         if tv.text != text {
             context.coordinator.isUpdating = true
             let sel = tv.selectedRange
             tv.text = text
-            if sel.location <= tv.text.utf16.count { tv.selectedRange = sel }
+            let length = tv.text.utf16.count
+            let location = min(sel.location, length)
+            tv.selectedRange = NSRange(location: location, length: min(sel.length, length - location))
             context.coordinator.isUpdating = false
         }
         
-        if let action = pendingAction {
-            pendingAction = nil
-            apply(action, to: tv)
+        if let action = pendingAction, !context.coordinator.isApplyingAction {
+            applyAfterUpdate(action, to: tv, coordinator: context.coordinator)
+        }
+    }
+    
+    /// Applies a toolbar action once the current view update finishes.
+    ///
+    /// > Warning: Applying it during the update would change the text binding (through the delegate) and clear `pendingAction` while SwiftUI is updating views, which it warns about and can loop on. `isApplyingAction` keeps later updates from applying the same action again before it's cleared.
+    private func applyAfterUpdate(_ action: EditorAction, to textView: UITextView, coordinator: Coordinator) {
+        coordinator.isApplyingAction = true
+        Task { @MainActor in
+            apply(action, to: textView)
+            coordinator.parent.pendingAction = nil
+            coordinator.isApplyingAction = false
         }
     }
     
@@ -173,7 +198,7 @@ struct MarkdownEditorView: UIViewRepresentable {
         case let .wrap(prefix, suffix, placeholder):
             if sel.length > 0 {
                 let selected = nsString.substring(with: sel)
-                // Move cursor to selection end first so insertText replaces it.
+                // insertText replaces the selection.
                 tv.insertText(prefix + selected + suffix)
             } else {
                 tv.insertText(prefix + placeholder + suffix)
@@ -196,6 +221,7 @@ struct MarkdownEditorView: UIViewRepresentable {
     class Coordinator: NSObject, UITextViewDelegate {
         var parent: MarkdownEditorView
         var isUpdating = false
+        var isApplyingAction = false
         init(_ parent: MarkdownEditorView) { self.parent = parent }
         
         func textViewDidChange(_ tv: UITextView) {

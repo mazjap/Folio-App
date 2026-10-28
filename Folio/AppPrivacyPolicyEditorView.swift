@@ -16,7 +16,7 @@ class AppPrivacyPolicyEditorViewModel {
     var deleted = false
     
     let isEditing: Bool
-    private let repo = AppsRepository()
+    @ObservationIgnored private let repo: any AppsRepositoryProtocol
     
     private static let dateFormatter: DateFormatter = {
         let df = DateFormatter()
@@ -26,8 +26,9 @@ class AppPrivacyPolicyEditorViewModel {
         return df
     }()
     
-    init(appId: String, existing: AppPrivacyPolicy?) {
+    init(appId: String, existing: AppPrivacyPolicy?, repo: any AppsRepositoryProtocol = AppsRepository()) {
         self.appId = appId
+        self.repo = repo
         self.isEditing = existing != nil
         self.appName = existing?.appName ?? ""
         self.lastUpdated = existing.flatMap { Self.dateFormatter.date(from: $0.lastUpdated) } ?? Date()
@@ -69,13 +70,13 @@ class AppPrivacyPolicyEditorViewModel {
 struct AppPrivacyPolicyEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var vm: AppPrivacyPolicyEditorViewModel
-    let onSave: (AppPrivacyPolicy) -> Void
-    let onDelete: () -> Void
+    private let onSave: (AppPrivacyPolicy) -> Void
+    private let onDelete: () -> Void
     
     @State private var showDeleteConfirm = false
     
-    init(appId: String, existing: AppPrivacyPolicy?, onSave: @escaping (AppPrivacyPolicy) -> Void, onDelete: @escaping () -> Void) {
-        self._vm = State(initialValue: AppPrivacyPolicyEditorViewModel(appId: appId, existing: existing))
+    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository(), existing: AppPrivacyPolicy?, onSave: @escaping (AppPrivacyPolicy) -> Void, onDelete: @escaping () -> Void) {
+        self._vm = State(initialValue: AppPrivacyPolicyEditorViewModel(appId: appId, existing: existing, repo: repo))
         self.onSave = onSave
         self.onDelete = onDelete
     }
@@ -88,7 +89,7 @@ struct AppPrivacyPolicyEditorView: View {
             }
             
             Section("Content") {
-                markdownToolbar
+                MarkdownToolbar(pendingAction: $vm.pendingAction)
                 MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
                     .frame(minHeight: 200)
             }
@@ -115,19 +116,18 @@ struct AppPrivacyPolicyEditorView: View {
         .navigationTitle(vm.isEditing ? "Privacy Policy" : "New Privacy Policy")
         .toolbar { toolbarContent }
         .onChange(of: vm.saved) { _, policy in
-            if let policy { onSave(policy); dismiss() }
+            if let policy {
+                onSave(policy)
+                dismiss()
+            }
         }
-        .onChange(of: vm.deleted) { _, gone in
-            if gone { onDelete(); dismiss() }
+        .onChange(of: vm.deleted) { _, isDeleted in
+            if isDeleted {
+                onDelete()
+                dismiss()
+            }
         }
-        .alert("Error", isPresented: Binding(
-            get: { vm.error != nil },
-            set: { if !$0 { vm.error = nil } }
-        )) {
-            Button("OK", role: .cancel) { vm.error = nil }
-        } message: {
-            Text(vm.error?.localizedDescription ?? "")
-        }
+        .errorAlert($vm.error)
         .confirmationDialog("Delete privacy policy?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}
@@ -149,34 +149,10 @@ struct AppPrivacyPolicyEditorView: View {
             ToolbarItem(placement: .status) { ProgressView() }
         }
     }
-    
-    private var markdownToolbar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                mdButton("B", title: "Bold") { vm.pendingAction = .wrap(prefix: "**", suffix: "**", placeholder: "text") }
-                mdButton("I", title: "Italic") { vm.pendingAction = .wrap(prefix: "_", suffix: "_", placeholder: "text") }
-                mdButton("` `", title: "Code") { vm.pendingAction = .wrap(prefix: "`", suffix: "`", placeholder: "code") }
-                Divider().frame(height: 20)
-                mdButton("H1", title: "Heading 1") { vm.pendingAction = .prependLine("# ") }
-                mdButton("H2", title: "Heading 2") { vm.pendingAction = .prependLine("## ") }
-                mdButton("H3", title: "Heading 3") { vm.pendingAction = .prependLine("### ") }
-                Divider().frame(height: 20)
-                mdButton("[ ]", title: "Link") { vm.pendingAction = .wrap(prefix: "[", suffix: "](url)", placeholder: "text") }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-        }
-        .background(.bar)
-    }
-    
-    private func mdButton(_ label: String, title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-        }
-        .buttonStyle(.plain)
-        .help(title)
+}
+
+#Preview {
+    NavigationStack {
+        AppPrivacyPolicyEditorView(appId: AppPrivacyPolicy.sample.id, repo: TestAppsRepository(), existing: .sample, onSave: { _ in }, onDelete: {})
     }
 }

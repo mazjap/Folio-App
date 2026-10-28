@@ -17,10 +17,11 @@ class AppSupportEditorViewModel {
     var deleted = false
     
     let isEditing: Bool
-    private let repo = AppsRepository()
+    @ObservationIgnored private let repo: any AppsRepositoryProtocol
     
-    init(appId: String, existing: AppSupport?) {
+    init(appId: String, existing: AppSupport?, repo: any AppsRepositoryProtocol = AppsRepository()) {
         self.appId = appId
+        self.repo = repo
         self.isEditing = existing != nil
         self.appName = existing?.appName ?? ""
         self.version = existing?.version ?? ""
@@ -64,13 +65,13 @@ class AppSupportEditorViewModel {
 struct AppSupportEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var vm: AppSupportEditorViewModel
-    let onSave: (AppSupport) -> Void
-    let onDelete: () -> Void
+    private let onSave: (AppSupport) -> Void
+    private let onDelete: () -> Void
     
     @State private var showDeleteConfirm = false
     
-    init(appId: String, existing: AppSupport?, onSave: @escaping (AppSupport) -> Void, onDelete: @escaping () -> Void) {
-        self._vm = State(initialValue: AppSupportEditorViewModel(appId: appId, existing: existing))
+    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository(), existing: AppSupport?, onSave: @escaping (AppSupport) -> Void, onDelete: @escaping () -> Void) {
+        self._vm = State(initialValue: AppSupportEditorViewModel(appId: appId, existing: existing, repo: repo))
         self.onSave = onSave
         self.onDelete = onDelete
     }
@@ -85,7 +86,7 @@ struct AppSupportEditorView: View {
             }
             
             Section("Content") {
-                markdownToolbar
+                MarkdownToolbar(pendingAction: $vm.pendingAction)
                 MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
                     .frame(minHeight: 200)
             }
@@ -112,19 +113,18 @@ struct AppSupportEditorView: View {
         .navigationTitle(vm.isEditing ? "Support" : "New Support Page")
         .toolbar { toolbarContent }
         .onChange(of: vm.saved) { _, support in
-            if let support { onSave(support); dismiss() }
+            if let support {
+                onSave(support)
+                dismiss()
+            }
         }
-        .onChange(of: vm.deleted) { _, gone in
-            if gone { onDelete(); dismiss() }
+        .onChange(of: vm.deleted) { _, isDeleted in
+            if isDeleted {
+                onDelete()
+                dismiss()
+            }
         }
-        .alert("Error", isPresented: Binding(
-            get: { vm.error != nil },
-            set: { if !$0 { vm.error = nil } }
-        )) {
-            Button("OK", role: .cancel) { vm.error = nil }
-        } message: {
-            Text(vm.error?.localizedDescription ?? "")
-        }
+        .errorAlert($vm.error)
         .confirmationDialog("Delete support page?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}
@@ -146,34 +146,10 @@ struct AppSupportEditorView: View {
             ToolbarItem(placement: .status) { ProgressView() }
         }
     }
-    
-    private var markdownToolbar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                mdButton("B", title: "Bold") { vm.pendingAction = .wrap(prefix: "**", suffix: "**", placeholder: "text") }
-                mdButton("I", title: "Italic") { vm.pendingAction = .wrap(prefix: "_", suffix: "_", placeholder: "text") }
-                mdButton("` `", title: "Code") { vm.pendingAction = .wrap(prefix: "`", suffix: "`", placeholder: "code") }
-                Divider().frame(height: 20)
-                mdButton("H1", title: "Heading 1") { vm.pendingAction = .prependLine("# ") }
-                mdButton("H2", title: "Heading 2") { vm.pendingAction = .prependLine("## ") }
-                mdButton("H3", title: "Heading 3") { vm.pendingAction = .prependLine("### ") }
-                Divider().frame(height: 20)
-                mdButton("[ ]", title: "Link") { vm.pendingAction = .wrap(prefix: "[", suffix: "](url)", placeholder: "text") }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-        }
-        .background(.bar)
-    }
-    
-    private func mdButton(_ label: String, title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-        }
-        .buttonStyle(.plain)
-        .help(title)
+}
+
+#Preview {
+    NavigationStack {
+        AppSupportEditorView(appId: AppSupport.sample.id, repo: TestAppsRepository(), existing: .sample, onSave: { _ in }, onDelete: {})
     }
 }

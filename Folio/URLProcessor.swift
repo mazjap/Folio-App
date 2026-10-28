@@ -3,17 +3,18 @@ import Foundation
 struct URLProcessor {
     let baseURL: URL
     let apiKey: String
+    var session: URLSession = .shared
     
     private static let decoder: JSONDecoder = {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return d
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }()
     
     private static let encoder: JSONEncoder = {
-        let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
-        return e
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
     }()
     
     // MARK: - HTTP methods
@@ -48,6 +49,13 @@ struct URLProcessor {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = multipartBody(fileData: fileData, fileName: fileName, mimeType: mimeType, context: context, id: id, overwrite: overwrite, boundary: boundary)
         return try await perform(request)
+    }
+    
+    // MARK: - URLs
+    
+    /// The URL of an API endpoint, like `apiURL("projects", id)` for `<base>/api/projects/<id>`.
+    func apiURL(_ components: String...) -> URL {
+        components.reduce(baseURL.appending(path: "api")) { $0.appending(path: $1) }
     }
     
     // MARK: - Coding helpers
@@ -111,13 +119,15 @@ struct URLProcessor {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             throw .networkFailed(error)
         }
+        
         guard let http = response as? HTTPURLResponse else {
             throw .httpError(statusCode: -1)
         }
+        
         switch http.statusCode {
         case 200..<300: return data
         case 401: throw .unauthorized
@@ -128,52 +138,42 @@ struct URLProcessor {
     }
 }
 
-// MARK: - SettingsStore convenience
+// MARK: - Settings
 
 extension URLProcessor {
-    static func fromSettings() throws(APIError) -> URLProcessor {
-        let urlString = activeBaseURLString()
+    static func fromSettings(_ settings: ServerSettings = ServerSettings()) throws(APIError) -> URLProcessor {
+        let urlString = settings.baseURLString
         guard !urlString.isEmpty, let url = URL(string: urlString) else {
             throw .invalidURL
         }
-        let env = UserDefaults.standard.string(forKey: FolioStorageKey.activeEnvironment) ?? "dev"
-        let apiKeyKey = env == "prod" ? FolioStorageKey.prodApiKey : FolioStorageKey.devApiKey
-        let apiKey = KeychainService.read(key: apiKeyKey) ?? ""
-        return URLProcessor(baseURL: url, apiKey: apiKey)
-    }
-    
-    // Turns a server-relative path like "/media/posts/img.jpg" into an absolute URL string.
-    func absoluteString(for path: String) -> String {
-        let base = baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return path.hasPrefix("/") ? base + path : path
+        
+        return URLProcessor(baseURL: url, apiKey: settings.apiKey)
     }
 }
 
-// Returns the base URL string for the currently active environment.
-private func activeBaseURLString() -> String {
-    let env = UserDefaults.standard.string(forKey: FolioStorageKey.activeEnvironment) ?? "dev"
-    let key = env == "prod" ? FolioStorageKey.prodBaseURL : FolioStorageKey.devBaseURL
-    return UserDefaults.standard.string(forKey: key) ?? ""
-}
+// MARK: - Media URLs
 
-// Resolves a server-relative path to a full URL using the base URL stored in settings.
-// Returns nil for empty paths; passes through already-absolute URLs unchanged.
-func mediaURL(for path: String) -> URL? {
+/// Resolves a server-relative path to a full URL using the active environment's base URL.
+/// Returns nil for empty paths; passes through already-absolute URLs unchanged.
+func mediaURL(for path: String, baseURL: String = ServerSettings().baseURLString) -> URL? {
     guard !path.isEmpty else { return nil }
+    
     if let url = URL(string: path), url.scheme != nil { return url }
-    let base = activeBaseURLString()
-    let trimmedBase = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    
+    let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     let trimmedPath = path.hasPrefix("/") ? path : "/\(path)"
     return URL(string: trimmedBase + trimmedPath)
 }
 
-// Rewrites ![alt](/relative/path) image references in markdown to use the full base URL,
-// so StructuredText (Textual) can load them. Already-absolute URLs pass through unchanged.
-func resolveMarkdownImageURLs(_ content: String) -> String {
-    let base = activeBaseURLString()
-    guard !base.isEmpty else { return content }
-    let trimmedBase = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    guard let regex = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\((/[^)]*)\)"#) else { return content }
+/// Rewrites `![alt](/relative/path)` image references in markdown to use the full base URL,
+/// so StructuredText (Textual) can load them. Already-absolute URLs pass through unchanged.
+func resolveMarkdownImageURLs(_ content: String, baseURL: String = ServerSettings().baseURLString) -> String {
+    guard !baseURL.isEmpty,
+          let regex = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\((/[^)]*)\)"#)
+    else { return content }
+    
+    let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     let range = NSRange(content.startIndex..., in: content)
-    return regex.stringByReplacingMatches(in: content, range: range, withTemplate: "![$1](\(trimmedBase)$2)")
+    let template = "![$1](\(NSRegularExpression.escapedTemplate(for: trimmedBase))$2)"
+    return regex.stringByReplacingMatches(in: content, range: range, withTemplate: template)
 }

@@ -1,18 +1,21 @@
 import SwiftUI
 import PhotosUI
-import UniformTypeIdentifiers
 
+/// A project's gallery: drag to reorder, edit captions, remove, and add images through `onAdd`, which uploads them.
 struct MediaManagerView: View {
-    @Binding var media: [MediaItem]
-    let context: MediaContext
-    let id: String
+    @Binding private var media: [MediaItem]
+    private let isUploadEnabled: Bool
+    private let isUploading: Bool
+    private let onAdd: ([PendingImage]) async -> Void
     
     @State private var pickerItems: [PhotosPickerItem] = []
-    @State private var isUploading = false
-    @State private var uploadError: String?
     
-    
-    private let repo = MediaRepository()
+    init(media: Binding<[MediaItem]>, isUploadEnabled: Bool, isUploading: Bool, onAdd: @escaping ([PendingImage]) async -> Void) {
+        self._media = media
+        self.isUploadEnabled = isUploadEnabled
+        self.isUploading = isUploading
+        self.onAdd = onAdd
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -27,113 +30,85 @@ struct MediaManagerView: View {
                     }
                     .draggable(item.id)
                     .dropDestination(for: String.self) { droppedIDs, _ in
-                        guard let droppedID = droppedIDs.first, droppedID != item.id,
-                              let from = media.firstIndex(where: { $0.id == droppedID }),
-                              let to = media.firstIndex(where: { $0.id == item.id })
-                        else { return false }
-                        withAnimation {
-                            let moved = media.remove(at: from)
-                            media.insert(moved, at: from < to ? to - 1 : to)
-                        }
-                        return true
+                        return move(droppedIDs.first, onto: item.id)
                     }
                 }
             }
             
             HStack(spacing: 8) {
-                PhotosPicker(
-                    selection: $pickerItems,
-                    maxSelectionCount: 10,
-                    matching: .any(of: [.images, .videos])
-                ) {
+                PhotosPicker(selection: $pickerItems, maxSelectionCount: 10, matching: .images) {
                     Label("Add from Photos", systemImage: "photo")
                 }
                 .onChange(of: pickerItems) { _, items in
                     guard !items.isEmpty else { return }
-                    Task { await uploadPhotoItems(items) }
+                    
+                    Task {
+                        var images: [PendingImage] = []
+                        for item in items {
+                            if let image = await PendingImage.load(from: item) { images.append(image) }
+                        }
+                        pickerItems = []
+                        await onAdd(images)
+                    }
                 }
                 
                 #if os(macOS)
                 Button("Add from Files", systemImage: "folder") {
-                    let panel = NSOpenPanel()
-                    panel.allowedContentTypes = [.image, .video, .movie]
-                    panel.allowsMultipleSelection = true
-                    guard panel.runModal() == .OK else { return }
-                    Task { await uploadFileURLs(panel.urls) }
+                    let images = PendingImage.chooseFiles(allowsMultipleSelection: true)
+                    Task { await onAdd(images) }
                 }
                 #endif
                 
                 if isUploading {
                     ProgressView()
+                        .controlSize(.small)
                 }
             }
             .buttonStyle(.bordered)
+            .disabled(!isUploadEnabled || isUploading)
             
-            if let err = uploadError {
-                Label(err, systemImage: "exclamationmark.triangle")
+            if !isUploadEnabled {
+                Text("Enter an ID before adding media.")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.secondary)
             }
         }
         #if os(macOS)
         .dropDestination(for: URL.self) { urls, _ in
-            Task { await uploadFileURLs(urls) }
-            return true
+            guard isUploadEnabled else { return false }
+            
+            let images = urls.compactMap(PendingImage.init(contentsOf:))
+            Task { await onAdd(images) }
+            return !images.isEmpty
         }
         #endif
     }
     
-    // MARK: - Upload helpers
-    
-    private func uploadPhotoItems(_ items: [PhotosPickerItem]) async {
-        isUploading = true
-        defer {
-            isUploading = false
-            pickerItems = []
+    private func move(_ droppedID: String?, onto targetID: String) -> Bool {
+        guard let droppedID, droppedID != targetID,
+              let from = media.firstIndex(where: { $0.id == droppedID }),
+              let to = media.firstIndex(where: { $0.id == targetID })
+        else { return false }
+        
+        withAnimation {
+            let moved = media.remove(at: from)
+            // Removing the item shifts the ones after it down by one.
+            media.insert(moved, at: from < to ? to - 1 : to)
         }
-        for item in items {
-            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-            let utType = item.supportedContentTypes.first
-            let mimeType = utType?.preferredMIMEType ?? "image/jpeg"
-            let ext = utType?.preferredFilenameExtension ?? "jpg"
-            let fileName = "\(UUID().uuidString).\(ext)"
-            let mediaType: MediaType = utType?.conforms(to: .video) == true ? .video : .image
-            await uploadData(data, fileName: fileName, mimeType: mimeType, mediaType: mediaType)
-        }
-    }
-    
-    #if os(macOS)
-    private func uploadFileURLs(_ urls: [URL]) async {
-        isUploading = true
-        defer { isUploading = false }
-        for url in urls {
-            guard url.startAccessingSecurityScopedResource() else { continue }
-            defer { url.stopAccessingSecurityScopedResource() }
-            guard let data = try? Data(contentsOf: url) else { continue }
-            let utType = UTType(filenameExtension: url.pathExtension)
-            let mimeType = utType?.preferredMIMEType ?? "application/octet-stream"
-            let mediaType: MediaType = utType?.conforms(to: .video) == true ? .video : .image
-            await uploadData(data, fileName: url.lastPathComponent, mimeType: mimeType, mediaType: mediaType)
-        }
-    }
-    #endif
-    
-    private func uploadData(_ data: Data, fileName: String, mimeType: String, mediaType: MediaType) async {
-        do {
-            let url = try await repo.upload(fileData: data, fileName: fileName, mimeType: mimeType, context: context, id: id)
-            media.append(MediaItem(type: mediaType, url: url, caption: nil))
-            uploadError = nil
-        } catch {
-            uploadError = error.localizedDescription
-        }
+        return true
     }
 }
 
 // MARK: - Row
 
 private struct MediaItemRow: View {
-    @Binding var item: MediaItem
-    var onRemove: () -> Void
+    @Binding private var item: MediaItem
+    private let onRemove: () -> Void
+    
+    init(item: Binding<MediaItem>, onRemove: @escaping () -> Void) {
+        self._item = item
+        self.onRemove = onRemove
+    }
     
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -180,4 +155,13 @@ private struct MediaItemRow: View {
         }
         .padding(.vertical, 4)
     }
+}
+
+#Preview {
+    @Previewable @State var media = ProjectDetail.sample.media
+    
+    Form {
+        MediaManagerView(media: $media, isUploadEnabled: true, isUploading: false) { _ in }
+    }
+    .formStyle(.grouped)
 }
