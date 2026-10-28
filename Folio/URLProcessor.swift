@@ -132,11 +132,13 @@ struct URLProcessor {
 
 extension URLProcessor {
     static func fromSettings() throws(APIError) -> URLProcessor {
-        let urlString = UserDefaults.standard.string(forKey: FolioStorageKey.baseURL) ?? ""
+        let urlString = activeBaseURLString()
         guard !urlString.isEmpty, let url = URL(string: urlString) else {
             throw .invalidURL
         }
-        let apiKey = KeychainService.read(key: FolioStorageKey.apiKey) ?? ""
+        let env = UserDefaults.standard.string(forKey: FolioStorageKey.activeEnvironment) ?? "dev"
+        let apiKeyKey = env == "prod" ? FolioStorageKey.prodApiKey : FolioStorageKey.devApiKey
+        let apiKey = KeychainService.read(key: apiKeyKey) ?? ""
         return URLProcessor(baseURL: url, apiKey: apiKey)
     }
 
@@ -147,12 +149,19 @@ extension URLProcessor {
     }
 }
 
+// Returns the base URL string for the currently active environment.
+private func activeBaseURLString() -> String {
+    let env = UserDefaults.standard.string(forKey: FolioStorageKey.activeEnvironment) ?? "dev"
+    let key = env == "prod" ? FolioStorageKey.prodBaseURL : FolioStorageKey.devBaseURL
+    return UserDefaults.standard.string(forKey: key) ?? ""
+}
+
 // Resolves a server-relative path to a full URL using the base URL stored in settings.
 // Returns nil for empty paths; passes through already-absolute URLs unchanged.
 func mediaURL(for path: String) -> URL? {
     guard !path.isEmpty else { return nil }
     if let url = URL(string: path), url.scheme != nil { return url }
-    let base = UserDefaults.standard.string(forKey: FolioStorageKey.baseURL) ?? ""
+    let base = activeBaseURLString()
     let trimmedBase = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     let trimmedPath = path.hasPrefix("/") ? path : "/\(path)"
     return URL(string: trimmedBase + trimmedPath)
@@ -161,7 +170,7 @@ func mediaURL(for path: String) -> URL? {
 // Rewrites ![alt](/relative/path) image references in markdown to use the full base URL,
 // so StructuredText (Textual) can load them. Already-absolute URLs pass through unchanged.
 func resolveMarkdownImageURLs(_ content: String) -> String {
-    let base = UserDefaults.standard.string(forKey: FolioStorageKey.baseURL) ?? ""
+    let base = activeBaseURLString()
     guard !base.isEmpty else { return content }
     let trimmedBase = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     guard let regex = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\((/[^)]*)\)"#) else { return content }

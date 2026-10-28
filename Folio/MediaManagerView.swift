@@ -11,9 +11,6 @@ struct MediaManagerView: View {
     @State private var isUploading = false
     @State private var uploadError: String?
 
-    #if os(macOS)
-    @State private var showFileImporter = false
-    #endif
 
     private let repo = MediaRepository()
 
@@ -28,8 +25,19 @@ struct MediaManagerView: View {
                     MediaItemRow(item: $item) {
                         withAnimation { media.removeAll { $0.id == item.id } }
                     }
+                    .draggable(item.id)
+                    .dropDestination(for: String.self) { droppedIDs, _ in
+                        guard let droppedID = droppedIDs.first, droppedID != item.id,
+                              let from = media.firstIndex(where: { $0.id == droppedID }),
+                              let to = media.firstIndex(where: { $0.id == item.id })
+                        else { return false }
+                        withAnimation {
+                            let moved = media.remove(at: from)
+                            media.insert(moved, at: from < to ? to - 1 : to)
+                        }
+                        return true
+                    }
                 }
-                .onMove { media.move(fromOffsets: $0, toOffset: $1) }
             }
 
             HStack(spacing: 8) {
@@ -47,7 +55,11 @@ struct MediaManagerView: View {
 
                 #if os(macOS)
                 Button("Add from Files", systemImage: "folder") {
-                    showFileImporter = true
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.image, .video, .movie]
+                    panel.allowsMultipleSelection = true
+                    guard panel.runModal() == .OK else { return }
+                    Task { await uploadFileURLs(panel.urls) }
                 }
                 #endif
 
@@ -64,18 +76,6 @@ struct MediaManagerView: View {
             }
         }
         #if os(macOS)
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: [.image, .video, .movie],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                Task { await uploadFileURLs(urls) }
-            case .failure(let e):
-                uploadError = e.localizedDescription
-            }
-        }
         .dropDestination(for: URL.self) { urls, _ in
             Task { await uploadFileURLs(urls) }
             return true
@@ -135,13 +135,29 @@ private struct MediaItemRow: View {
     @Binding var item: MediaItem
     var onRemove: () -> Void
 
-    @State private var isEditingCaption = false
-
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: item.type == .video ? "video.fill" : "photo.fill")
-                .foregroundStyle(.secondary)
-                .frame(width: 24)
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(.tertiary)
+                .frame(width: 16)
+
+            AsyncImage(url: mediaURL(for: item.url)) { phase in
+                if case .success(let image) = phase {
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Color.secondary.opacity(0.12)
+                        .overlay {
+                            if case .empty = phase {
+                                ProgressView().scaleEffect(0.6)
+                            } else {
+                                Image(systemName: item.type == .video ? "video.fill" : "photo")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                }
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.url)

@@ -1,43 +1,66 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage(FolioStorageKey.baseURL) private var baseURL = ""
-    @State private var apiKey = KeychainService.read(key: FolioStorageKey.apiKey) ?? ""
+    @AppStorage(FolioStorageKey.activeEnvironment) private var activeEnvironment = "dev"
+    @State private var devURL = UserDefaults.standard.string(forKey: FolioStorageKey.devBaseURL) ?? ""
+    @State private var prodURL = UserDefaults.standard.string(forKey: FolioStorageKey.prodBaseURL) ?? ""
+    @State private var devApiKey = KeychainService.read(key: FolioStorageKey.devApiKey) ?? ""
+    @State private var prodApiKey = KeychainService.read(key: FolioStorageKey.prodApiKey) ?? ""
     @State private var showKeySaved = false
+
+    private var isDev: Bool { activeEnvironment == "dev" }
 
     var body: some View {
         Form {
-            Section("Server") {
-                TextField("Base URL", text: $baseURL, prompt: Text("https://example.com"))
-                    .textContentType(.URL)
-                    #if !os(macOS)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    #endif
+            Picker("Environment", selection: $activeEnvironment) {
+                Text("Dev").tag("dev")
+                Text("Prod").tag("prod")
+            }
+            .pickerStyle(.segmented)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets())
 
-                HStack {
-                    Button("Dev") {
-                        baseURL = Secrets.portfolioUrl.isEmpty
-                            ? "http://localhost:3001"
-                            : Secrets.portfolioUrl
-                    }
-                    .buttonStyle(.bordered)
-                    Button("Prod") {
-                        let prod = Bundle.main.infoDictionary?["PORTFOLIO_URL"] as? String ?? ""
-                        if !prod.isEmpty { baseURL = prod }
-                    }
-                    .buttonStyle(.bordered)
+            Section("Server") {
+                if isDev {
+                    TextField("Base URL", text: $devURL, prompt: Text("http://localhost:3001"))
+                        .textContentType(.URL)
+                        #if !os(macOS)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .onChange(of: devURL) {
+                            UserDefaults.standard.set(devURL, forKey: FolioStorageKey.devBaseURL)
+                        }
+                } else {
+                    TextField("Base URL", text: $prodURL, prompt: Text("https://example.com"))
+                        .textContentType(.URL)
+                        #if !os(macOS)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .onChange(of: prodURL) {
+                            UserDefaults.standard.set(prodURL, forKey: FolioStorageKey.prodBaseURL)
+                        }
                 }
             }
 
             Section("API Key") {
-                SecureField("Bearer token", text: $apiKey, prompt: Text("Paste your API key"))
+                if isDev {
+                    SecureField("Bearer token", text: $devApiKey, prompt: Text("Paste your API key"))
+                } else {
+                    SecureField("Bearer token", text: $prodApiKey, prompt: Text("Paste your API key"))
+                }
                 Button("Save Key") {
-                    try? KeychainService.save(apiKey, key: FolioStorageKey.apiKey)
+                    if isDev {
+                        try? KeychainService.save(devApiKey, key: FolioStorageKey.devApiKey)
+                    } else {
+                        try? KeychainService.save(prodApiKey, key: FolioStorageKey.prodApiKey)
+                    }
                     showKeySaved = true
                 }
-                .disabled(apiKey.isEmpty)
+                .disabled(isDev ? devApiKey.isEmpty : prodApiKey.isEmpty)
             }
         }
         .formStyle(.grouped)

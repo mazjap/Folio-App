@@ -9,6 +9,9 @@ struct ContentView: View {
             Tab("Posts", systemImage: "doc.text") {
                 PostsView()
             }
+            Tab("Apps", systemImage: "square.grid.2x2") {
+                AppsView()
+            }
             Tab("Settings", systemImage: "gear") {
                 SettingsView()
             }

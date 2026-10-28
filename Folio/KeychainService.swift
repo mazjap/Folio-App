@@ -4,9 +4,11 @@ import Security
 // MARK: - Storage key constants
 
 enum FolioStorageKey {
-    static let baseURL = "folio.baseURL"
-    static let apiKey = "folio.apiKey"
-    static let hasSeeded = "folio.hasSeeded"
+    static let activeEnvironment = "folio.activeEnvironment"
+    static let devBaseURL = "folio.dev.baseURL"
+    static let prodBaseURL = "folio.prod.baseURL"
+    static let devApiKey = "folio.dev.apiKey"
+    static let prodApiKey = "folio.prod.apiKey"
 }
 
 // MARK: - Keychain

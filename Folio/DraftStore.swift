@@ -8,6 +8,7 @@ struct PostDraft: Codable {
     var tags: [String]
     var heroImage: String
     var series: String
+    var createdAt: Date?
     var savedAt: Date
 }
 
@@ -22,6 +23,7 @@ struct ProjectDraft: Codable {
     var heroImage: String
     var techStack: [String]
     var links: [String: String]
+    var createdAt: Date?
     var savedAt: Date
 }
 

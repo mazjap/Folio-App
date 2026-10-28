@@ -9,6 +9,7 @@ struct PostUpdate: Encodable {
     var tags: [String]?
     var heroImage: String?
     var series: String?
+    var createdAt: Date?
 
     func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -18,10 +19,11 @@ struct PostUpdate: Encodable {
         try c.encodeIfPresent(tags, forKey: .tags)
         try c.encodeIfPresent(heroImage, forKey: .heroImage)
         try c.encodeIfPresent(series, forKey: .series)
+        try c.encodeIfPresent(createdAt, forKey: .createdAt)
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, excerpt, content, tags, heroImage, series
+        case title, excerpt, content, tags, heroImage, series, createdAt
     }
 }
 

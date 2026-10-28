@@ -26,7 +26,13 @@ class PostEditorViewModel {
     var heroImage = ""
     var pendingHeroImage: PendingImage?
     var pendingAction: EditorAction?
-    var createdAt: Date?
+    var createdAt: Date? {
+        didSet {
+            scheduleAutosave()
+            guard !isPopulating, let created = createdAt, let updated = updatedAt, created > updated else { return }
+            updatedAt = created
+        }
+    }
     var updatedAt: Date?
     private(set) var serverContent = ""
 
@@ -156,6 +162,7 @@ class PostEditorViewModel {
             tags: tags,
             heroImage: heroImage,
             series: series,
+            createdAt: createdAt,
             savedAt: Date()
         )
         DraftStore.save(draft, key: draftKey)
@@ -218,6 +225,7 @@ class PostEditorViewModel {
         tags = draft.tags
         heroImage = draft.heroImage
         series = draft.series
+        if let draftCreatedAt = draft.createdAt { createdAt = draftCreatedAt }
     }
 
     private func populate(from detail: PostDetail) {
@@ -256,7 +264,8 @@ class PostEditorViewModel {
             content: content,
             tags: tags,
             heroImage: heroImage.isEmpty ? nil : heroImage,
-            series: series.isEmpty ? nil : series
+            series: series.isEmpty ? nil : series,
+            createdAt: createdAt
         )
     }
 }

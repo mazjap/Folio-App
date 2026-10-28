@@ -51,6 +51,7 @@ struct ProjectsView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button("New Project", systemImage: "plus") {
+                        selectedProjectID = nil
                         isCreatingNew = true
                     }
                 }

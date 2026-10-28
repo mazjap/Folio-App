@@ -30,7 +30,13 @@ class ProjectFormViewModel {
     var pendingHeroImage: PendingImage?
     var pendingDescriptionAction: EditorAction?
     var media: [MediaItem] = []
-    var createdAt: Date?
+    var createdAt: Date? {
+        didSet {
+            scheduleAutosave()
+            guard !isPopulating, let created = createdAt, let updated = updatedAt, created > updated else { return }
+            updatedAt = created
+        }
+    }
     var updatedAt: Date?
     private(set) var serverDescription = ""
 
@@ -155,6 +161,7 @@ class ProjectFormViewModel {
             heroImage: heroImage,
             techStack: techStack,
             links: links,
+            createdAt: createdAt,
             savedAt: Date()
         )
         DraftStore.save(draft, key: draftKey)
@@ -220,6 +227,7 @@ class ProjectFormViewModel {
         heroImage = draft.heroImage
         techStack = draft.techStack
         links = draft.links
+        if let draftCreatedAt = draft.createdAt { createdAt = draftCreatedAt }
     }
 
     private func populate(from detail: ProjectDetail) {
@@ -269,7 +277,8 @@ class ProjectFormViewModel {
             featured: featured,
             techStack: techStack,
             links: links,
-            media: media
+            media: media,
+            createdAt: createdAt
         )
     }
 }

@@ -17,8 +17,6 @@ struct PostEditorView: View {
     @State private var diffRanges: [NSRange] = []
     @State private var heroPickerItem: PhotosPickerItem?
     @State private var inlinePickerItem: PhotosPickerItem?
-    @State private var showHeroFileImporter = false
-    @State private var showInlineFileImporter = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,12 +69,6 @@ struct PostEditorView: View {
             Button("Keep editing", role: .cancel) {}
         } message: {
             Text("Reverts to the last published version.")
-        }
-        .fileImporter(isPresented: $showHeroFileImporter, allowedContentTypes: [.image]) { result in
-            if let url = try? result.get() { loadHeroFromFileURL(url) }
-        }
-        .fileImporter(isPresented: $showInlineFileImporter, allowedContentTypes: [.image]) { result in
-            if let url = try? result.get() { Task { await loadInlineFromFileURL(url) } }
         }
     }
 
@@ -165,7 +157,13 @@ struct PostEditorView: View {
                     }
                 }
                 #if os(macOS)
-                Button(action: { showInlineFileImporter = true }) {
+                Button(action: {
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.image]
+                    panel.allowsMultipleSelection = false
+                    guard panel.runModal() == .OK, let url = panel.url else { return }
+                    Task { await loadInlineFromFileURL(url) }
+                }) {
                     Label("Image from Files", systemImage: "folder")
                         .labelStyle(.iconOnly)
                         .font(.system(size: 12))
@@ -252,11 +250,16 @@ struct PostEditorView: View {
                 TagsField(tags: $vm.tags)
             }
 
-            if let createdAt = vm.createdAt {
+            if vm.createdAt != nil {
                 Section("Dates") {
-                    LabeledContent("Published") {
-                        Text(createdAt.formatted(date: .abbreviated, time: .omitted))
-                    }
+                    DatePicker(
+                        "Published",
+                        selection: Binding(
+                            get: { vm.createdAt ?? Date() },
+                            set: { vm.createdAt = $0 }
+                        ),
+                        displayedComponents: .date
+                    )
                     if let updatedAt = vm.updatedAt {
                         LabeledContent("Updated") {
                             Text(updatedAt.formatted(date: .abbreviated, time: .omitted))
@@ -317,9 +320,15 @@ struct PostEditorView: View {
             }
         }
         #if os(macOS)
-        Button("Select from Files…") { showHeroFileImporter = true }
-            .buttonStyle(.plain)
-            .foregroundStyle(.tint)
+        Button("Select from Files…") {
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.image]
+            panel.allowsMultipleSelection = false
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            loadHeroFromFileURL(url)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.tint)
         #endif
     }
 

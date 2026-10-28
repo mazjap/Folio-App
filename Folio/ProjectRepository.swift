@@ -13,6 +13,7 @@ struct ProjectUpdate: Encodable {
     var techStack: [String]?
     var links: [String: String]?
     var media: [MediaItem]?
+    var createdAt: Date?
 
     func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -26,10 +27,11 @@ struct ProjectUpdate: Encodable {
         try c.encodeIfPresent(techStack, forKey: .techStack)
         try c.encodeIfPresent(links, forKey: .links)
         try c.encodeIfPresent(media, forKey: .media)
+        try c.encodeIfPresent(createdAt, forKey: .createdAt)
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, tagline, description, heroImage, category, status, featured, techStack, links, media
+        case title, tagline, description, heroImage, category, status, featured, techStack, links, media, createdAt
     }
 }
 

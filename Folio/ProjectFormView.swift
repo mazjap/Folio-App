@@ -18,8 +18,6 @@ struct ProjectFormView: View {
     @State private var newLinkURL = ""
     @State private var heroPickerItem: PhotosPickerItem?
     @State private var descriptionPickerItem: PhotosPickerItem?
-    @State private var showHeroFileImporter = false
-    @State private var showDescriptionFileImporter = false
 
     var body: some View {
         Form {
@@ -107,12 +105,6 @@ struct ProjectFormView: View {
         } message: {
             Text("Reverts to the last published version.")
         }
-        .fileImporter(isPresented: $showHeroFileImporter, allowedContentTypes: [.image]) { result in
-            if let url = try? result.get() { loadHeroFromFileURL(url) }
-        }
-        .fileImporter(isPresented: $showDescriptionFileImporter, allowedContentTypes: [.image]) { result in
-            if let url = try? result.get() { Task { await loadDescriptionImageFromFileURL(url) } }
-        }
     }
 
     // MARK: - Hero image row
@@ -155,9 +147,15 @@ struct ProjectFormView: View {
             }
         }
         #if os(macOS)
-        Button("Select from Files…") { showHeroFileImporter = true }
-            .buttonStyle(.plain)
-            .foregroundStyle(.tint)
+        Button("Select from Files…") {
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.image]
+            panel.allowsMultipleSelection = false
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            loadHeroFromFileURL(url)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.tint)
         #endif
     }
 
@@ -179,7 +177,11 @@ struct ProjectFormView: View {
             }
             #if os(macOS)
             Button("From Files", systemImage: "folder") {
-                showDescriptionFileImporter = true
+                let panel = NSOpenPanel()
+                panel.allowedContentTypes = [.image]
+                panel.allowsMultipleSelection = false
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                Task { await loadDescriptionImageFromFileURL(url) }
             }
             .labelStyle(.titleAndIcon)
             .buttonStyle(.bordered)
@@ -313,11 +315,16 @@ struct ProjectFormView: View {
                 Toggle("Featured", isOn: $vm.featured)
             }
 
-            if let createdAt = vm.createdAt {
+            if vm.createdAt != nil {
                 Section("Dates") {
-                    LabeledContent("Created") {
-                        Text(createdAt.formatted(date: .abbreviated, time: .omitted))
-                    }
+                    DatePicker(
+                        "Created",
+                        selection: Binding(
+                            get: { vm.createdAt ?? Date() },
+                            set: { vm.createdAt = $0 }
+                        ),
+                        displayedComponents: .date
+                    )
                     if let updatedAt = vm.updatedAt {
                         LabeledContent("Updated") {
                             Text(updatedAt.formatted(date: .abbreviated, time: .omitted))
