@@ -1,15 +1,65 @@
 import Foundation
 
+// MARK: - Update payloads
+
+/// The fields the privacy policy editor saves.
+///
+/// The server merges an update into the stored page, so a field left out keeps its old value. Every field is sent, and a `nil` `contactUrl` or `contactText` is sent as `null`, which clears it.
+struct AppPrivacyPolicyUpdate: Encodable, Equatable {
+    var appName: String
+    var lastUpdated: String
+    var content: String
+    var contactUrl: String?
+    var contactText: String?
+    
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(appName, forKey: .appName)
+        try container.encode(lastUpdated, forKey: .lastUpdated)
+        try container.encode(content, forKey: .content)
+        try container.encode(contactUrl, forKey: .contactUrl)
+        try container.encode(contactText, forKey: .contactText)
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case appName, lastUpdated, content, contactUrl, contactText
+    }
+}
+
+/// The fields the support page editor saves. Like `AppPrivacyPolicyUpdate`, a `nil` contact field is sent as `null` to clear it.
+struct AppSupportUpdate: Encodable, Equatable {
+    var appName: String
+    var version: String
+    var subtitle: String
+    var content: String
+    var contactUrl: String?
+    var contactText: String?
+    
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(appName, forKey: .appName)
+        try container.encode(version, forKey: .version)
+        try container.encode(subtitle, forKey: .subtitle)
+        try container.encode(content, forKey: .content)
+        try container.encode(contactUrl, forKey: .contactUrl)
+        try container.encode(contactText, forKey: .contactText)
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case appName, version, subtitle, content, contactUrl, contactText
+    }
+}
+
 // MARK: - Protocol
 
 protocol AppsRepositoryProtocol {
     func fetchPrivacyPolicy(appId: String) async throws(APIError) -> AppPrivacyPolicy
     func createPrivacyPolicy(_ policy: AppPrivacyPolicy) async throws(APIError) -> AppPrivacyPolicy
-    func updatePrivacyPolicy(_ policy: AppPrivacyPolicy) async throws(APIError) -> AppPrivacyPolicy
+    func updatePrivacyPolicy(appId: String, fields: AppPrivacyPolicyUpdate) async throws(APIError) -> AppPrivacyPolicy
     func deletePrivacyPolicy(appId: String) async throws(APIError)
     func fetchSupport(appId: String) async throws(APIError) -> AppSupport
     func createSupport(_ support: AppSupport) async throws(APIError) -> AppSupport
-    func updateSupport(_ support: AppSupport) async throws(APIError) -> AppSupport
+    func updateSupport(appId: String, fields: AppSupportUpdate) async throws(APIError) -> AppSupport
     func deleteSupport(appId: String) async throws(APIError)
 }
 
@@ -30,9 +80,9 @@ struct AppsRepository: AppsRepositoryProtocol {
         return try p.decode(AppPrivacyPolicy.self, from: data)
     }
     
-    func updatePrivacyPolicy(_ policy: AppPrivacyPolicy) async throws(APIError) -> AppPrivacyPolicy {
+    func updatePrivacyPolicy(appId: String, fields: AppPrivacyPolicyUpdate) async throws(APIError) -> AppPrivacyPolicy {
         let p = try URLProcessor.fromSettings()
-        let data = try await p.put(p.apiURL("apps", policy.id, "privacy-policy"), body: try p.encode(policy))
+        let data = try await p.put(p.apiURL("apps", appId, "privacy-policy"), body: try p.encode(fields))
         return try p.decode(AppPrivacyPolicy.self, from: data)
     }
     
@@ -55,9 +105,9 @@ struct AppsRepository: AppsRepositoryProtocol {
         return try p.decode(AppSupport.self, from: data)
     }
     
-    func updateSupport(_ support: AppSupport) async throws(APIError) -> AppSupport {
+    func updateSupport(appId: String, fields: AppSupportUpdate) async throws(APIError) -> AppSupport {
         let p = try URLProcessor.fromSettings()
-        let data = try await p.put(p.apiURL("apps", support.id, "support"), body: try p.encode(support))
+        let data = try await p.put(p.apiURL("apps", appId, "support"), body: try p.encode(fields))
         return try p.decode(AppSupport.self, from: data)
     }
     
@@ -69,10 +119,14 @@ struct AppsRepository: AppsRepositoryProtocol {
 
 // MARK: - Test fake
 
-/// Keeps app pages in memory, for tests and previews.
+/// Keeps app pages in memory and merges updates the way the server does, for tests and previews.
 final class TestAppsRepository: AppsRepositoryProtocol {
     var privacyPolicies: [String: AppPrivacyPolicy]
     var supportPages: [String: AppSupport]
+    /// When set, the fetches throw it.
+    var fetchError: APIError?
+    private(set) var privacyPolicyUpdates: [(appId: String, fields: AppPrivacyPolicyUpdate)] = []
+    private(set) var supportUpdates: [(appId: String, fields: AppSupportUpdate)] = []
     
     init(privacyPolicies: [AppPrivacyPolicy] = [.sample], supportPages: [AppSupport] = [.sample]) {
         self.privacyPolicies = Dictionary(uniqueKeysWithValues: privacyPolicies.map { ($0.id, $0) })
@@ -80,6 +134,7 @@ final class TestAppsRepository: AppsRepositoryProtocol {
     }
     
     func fetchPrivacyPolicy(appId: String) async throws(APIError) -> AppPrivacyPolicy {
+        if let fetchError { throw fetchError }
         guard let policy = privacyPolicies[appId] else { throw .notFound }
         
         return policy
@@ -92,10 +147,16 @@ final class TestAppsRepository: AppsRepositoryProtocol {
         return policy
     }
     
-    func updatePrivacyPolicy(_ policy: AppPrivacyPolicy) async throws(APIError) -> AppPrivacyPolicy {
-        guard privacyPolicies[policy.id] != nil else { throw .notFound }
+    func updatePrivacyPolicy(appId: String, fields: AppPrivacyPolicyUpdate) async throws(APIError) -> AppPrivacyPolicy {
+        guard var policy = privacyPolicies[appId] else { throw .notFound }
         
-        privacyPolicies[policy.id] = policy
+        privacyPolicyUpdates.append((appId, fields))
+        policy.appName = fields.appName
+        policy.lastUpdated = fields.lastUpdated
+        policy.content = fields.content
+        policy.contactUrl = fields.contactUrl
+        policy.contactText = fields.contactText
+        privacyPolicies[appId] = policy
         return policy
     }
     
@@ -104,6 +165,7 @@ final class TestAppsRepository: AppsRepositoryProtocol {
     }
     
     func fetchSupport(appId: String) async throws(APIError) -> AppSupport {
+        if let fetchError { throw fetchError }
         guard let support = supportPages[appId] else { throw .notFound }
         
         return support
@@ -116,10 +178,17 @@ final class TestAppsRepository: AppsRepositoryProtocol {
         return support
     }
     
-    func updateSupport(_ support: AppSupport) async throws(APIError) -> AppSupport {
-        guard supportPages[support.id] != nil else { throw .notFound }
+    func updateSupport(appId: String, fields: AppSupportUpdate) async throws(APIError) -> AppSupport {
+        guard var support = supportPages[appId] else { throw .notFound }
         
-        supportPages[support.id] = support
+        supportUpdates.append((appId, fields))
+        support.appName = fields.appName
+        support.version = fields.version
+        support.subtitle = fields.subtitle
+        support.content = fields.content
+        support.contactUrl = fields.contactUrl
+        support.contactText = fields.contactText
+        supportPages[appId] = support
         return support
     }
     

@@ -9,6 +9,8 @@ struct MediaManagerView: View {
     private let onAdd: ([PendingImage]) async -> Void
     
     @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var isImporting = false
+    @State private var importError: PendingImage.ImportError?
     
     init(media: Binding<[MediaItem]>, isUploadEnabled: Bool, isUploading: Bool, onAdd: @escaping ([PendingImage]) async -> Void) {
         self._media = media
@@ -20,14 +22,22 @@ struct MediaManagerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if media.isEmpty {
-                Text("No media attached.")
+                Text("No images yet. Add some to show a gallery on the project's page.")
                     .foregroundStyle(.secondary)
-                    .font(.subheadline)
+                    .font(.callout)
             } else {
                 ForEach($media) { $item in
-                    MediaItemRow(item: $item) {
-                        withAnimation { media.removeAll { $0.id == item.id } }
-                    }
+                    MediaItemRow(
+                        item: $item,
+                        canMoveUp: item.id != media.first?.id,
+                        canMoveDown: item.id != media.last?.id,
+                        onMove: { offset in
+                            withAnimation { media.move(id: item.id, by: offset) }
+                        },
+                        onRemove: {
+                            withAnimation { media.removeAll { $0.id == item.id } }
+                        }
+                    )
                     .draggable(item.id)
                     .dropDestination(for: String.self) { droppedIDs, _ in
                         return move(droppedIDs.first, onto: item.id)
@@ -42,30 +52,27 @@ struct MediaManagerView: View {
                 .onChange(of: pickerItems) { _, items in
                     guard !items.isEmpty else { return }
                     
-                    Task {
-                        var images: [PendingImage] = []
-                        for item in items {
-                            if let image = await PendingImage.load(from: item) { images.append(image) }
-                        }
-                        pickerItems = []
-                        await onAdd(images)
-                    }
+                    pickerItems = []
+                    importAndAdd(items) { item throws(PendingImage.ImportError) in try await PendingImage.load(from: item) }
                 }
                 
                 #if os(macOS)
                 Button("Add from Files", systemImage: "folder") {
-                    let images = PendingImage.chooseFiles(allowsMultipleSelection: true)
-                    Task { await onAdd(images) }
+                    let urls = PendingImage.chooseFiles(allowsMultipleSelection: true)
+                    importAndAdd(urls) { url throws(PendingImage.ImportError) in try await PendingImage.load(contentsOf: url) }
                 }
                 #endif
                 
-                if isUploading {
+                if isImporting || isUploading {
                     ProgressView()
                         .controlSize(.small)
+                    Text(isImporting ? "Preparing…" : "Uploading…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .buttonStyle(.bordered)
-            .disabled(!isUploadEnabled || isUploading)
+            .disabled(!isUploadEnabled || isUploading || isImporting)
             
             if !isUploadEnabled {
                 Text("Enter an ID before adding media.")
@@ -75,26 +82,41 @@ struct MediaManagerView: View {
         }
         #if os(macOS)
         .dropDestination(for: URL.self) { urls, _ in
-            guard isUploadEnabled else { return false }
+            guard isUploadEnabled, !isUploading, !isImporting, !urls.isEmpty else { return false }
             
-            let images = urls.compactMap(PendingImage.init(contentsOf:))
-            Task { await onAdd(images) }
-            return !images.isEmpty
+            importAndAdd(urls) { url throws(PendingImage.ImportError) in try await PendingImage.load(contentsOf: url) }
+            return true
         }
         #endif
+        .errorAlert($importError)
+    }
+    
+    /// Prepares each source for upload (converting formats the server can't), then uploads the ones that worked. Shows why any couldn't be added.
+    private func importAndAdd<Source>(_ sources: [Source], load: @escaping (Source) async throws(PendingImage.ImportError) -> PendingImage) {
+        guard !sources.isEmpty else { return }
+        
+        isImporting = true
+        Task {
+            var images: [PendingImage] = []
+            for source in sources {
+                do throws(PendingImage.ImportError) {
+                    images.append(try await load(source))
+                } catch {
+                    importError = error
+                }
+            }
+            isImporting = false
+            await onAdd(images)
+        }
     }
     
     private func move(_ droppedID: String?, onto targetID: String) -> Bool {
-        guard let droppedID, droppedID != targetID,
-              let from = media.firstIndex(where: { $0.id == droppedID }),
-              let to = media.firstIndex(where: { $0.id == targetID })
-        else { return false }
+        guard let droppedID else { return false }
         
-        withAnimation {
-            let moved = media.remove(at: from)
-            // Removing the item shifts the ones after it down by one.
-            media.insert(moved, at: from < to ? to - 1 : to)
-        }
+        var reordered = media
+        guard reordered.move(id: droppedID, onto: targetID) else { return false }
+        
+        withAnimation { media = reordered }
         return true
     }
 }
@@ -103,11 +125,22 @@ struct MediaManagerView: View {
 
 private struct MediaItemRow: View {
     @Binding private var item: MediaItem
+    private let canMoveUp: Bool
+    private let canMoveDown: Bool
+    private let onMove: (Int) -> Void
     private let onRemove: () -> Void
     
-    init(item: Binding<MediaItem>, onRemove: @escaping () -> Void) {
+    /// - Parameter onMove: Moves the item up (`-1`) or down (`1`).
+    init(item: Binding<MediaItem>, canMoveUp: Bool, canMoveDown: Bool, onMove: @escaping (Int) -> Void, onRemove: @escaping () -> Void) {
         self._item = item
+        self.canMoveUp = canMoveUp
+        self.canMoveDown = canMoveDown
+        self.onMove = onMove
         self.onRemove = onRemove
+    }
+    
+    private var fileName: String {
+        (item.url as NSString).lastPathComponent
     }
     
     var body: some View {
@@ -116,44 +149,39 @@ private struct MediaItemRow: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 16)
             
-            AsyncImage(url: mediaURL(for: item.url)) { phase in
-                if case let .success(image) = phase {
-                    image.resizable().aspectRatio(contentMode: .fill)
-                } else {
-                    Color.secondary.opacity(0.12)
-                        .overlay {
-                            if case .empty = phase {
-                                ProgressView().scaleEffect(0.6)
-                            } else {
-                                Image(systemName: item.type == .video ? "video.fill" : "photo")
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                }
-            }
-            .frame(width: 56, height: 56)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            MediaThumbnail(path: item.url, placeholderSystemImage: item.type == .video ? "video" : "photo", size: 56)
             
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.url)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                TextField("Caption (optional)", text: Binding(
+            VStack(alignment: .leading, spacing: 2) {
+                TextField("Caption", text: Binding(
                     get: { item.caption ?? "" },
                     set: { item.caption = $0.isEmpty ? nil : $0 }
-                ))
-                .font(.caption)
+                ), prompt: Text("Add a caption"))
+                .textFieldStyle(.plain)
+                Text(fileName)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             
             Spacer()
             
-            Button("Remove", systemImage: "trash", role: .destructive, action: onRemove)
+            Button("Remove \(fileName)", systemImage: "xmark.circle.fill", role: .destructive, action: onRemove)
                 .labelStyle(.iconOnly)
-                .foregroundStyle(.red)
+                .foregroundStyle(.tertiary)
                 .buttonStyle(.plain)
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button("Move Up", systemImage: "arrow.up") { onMove(-1) }
+                .disabled(!canMoveUp)
+            Button("Move Down", systemImage: "arrow.down") { onMove(1) }
+                .disabled(!canMoveDown)
+            Divider()
+            Button("Remove", systemImage: "trash", role: .destructive, action: onRemove)
+        }
+        .accessibilityAction(named: "Move Up") { if canMoveUp { onMove(-1) } }
+        .accessibilityAction(named: "Move Down") { if canMoveDown { onMove(1) } }
     }
 }
 

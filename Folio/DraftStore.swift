@@ -32,6 +32,10 @@ nonisolated struct PostDraft: EditorDraft {
     var heroImage: String
     var series: String
     var createdAt: Date?
+    /// A hero image picked but not uploaded yet.
+    var pendingHeroImage: PendingImage?
+    /// Files uploaded while editing that the server's version doesn't use yet, deleted again if they're not used when the post is saved.
+    var uploadedFiles: [String]?
     var serverUpdatedAt: Date?
     var savedAt: Date
 }
@@ -49,14 +53,62 @@ nonisolated struct ProjectDraft: EditorDraft {
     var links: [String: String]
     var media: [MediaItem]?
     var createdAt: Date?
+    /// A hero image picked but not uploaded yet.
+    var pendingHeroImage: PendingImage?
+    /// Files uploaded while editing that the server's version doesn't use yet, deleted again if they're not used when the project is saved.
+    var uploadedFiles: [String]?
+    var serverUpdatedAt: Date?
+    var savedAt: Date
+}
+
+nonisolated struct AppPrivacyPolicyDraft: EditorDraft {
+    var appName: String
+    /// `yyyy-MM-dd`, as the server stores it.
+    var lastUpdated: String
+    var content: String
+    var contactUrl: String
+    var contactText: String
+    var serverUpdatedAt: Date?
+    var savedAt: Date
+}
+
+nonisolated struct AppSupportDraft: EditorDraft {
+    var appName: String
+    var version: String
+    var subtitle: String
+    var content: String
+    var contactUrl: String
+    var contactText: String
     var serverUpdatedAt: Date?
     var savedAt: Date
 }
 
 // MARK: - Store
 
-/// Saves drafts as JSON files, one per key (`post-<id>`, `project-new`, …).
+/// Saves drafts as JSON files, one per key (`prod.post-<id>`, `dev.new-project`, …).
 struct DraftStore {
+    enum DraftError: Error, LocalizedError {
+        case couldNotSave(any Error)
+        case couldNotDelete(any Error)
+        /// A saved draft couldn't be read. It was moved to `keptAt` (when that worked) so later saves don't overwrite it.
+        case unreadable(any Error, keptAt: URL?)
+        
+        var errorDescription: String? {
+            switch self {
+            case let .couldNotSave(error):
+                "Your draft couldn't be saved on this device, so unpublished changes aren't protected: \(error.localizedDescription)"
+            case let .couldNotDelete(error):
+                "The draft couldn't be deleted: \(error.localizedDescription)"
+            case let .unreadable(error, keptAt):
+                if let keptAt {
+                    "A saved draft couldn't be read (\(error.localizedDescription)). It was kept as \(keptAt.lastPathComponent) in Folio's drafts folder."
+                } else {
+                    "A saved draft couldn't be read: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
     let directory: URL
     
     /// Drafts in Application Support, where the app keeps them.
@@ -67,25 +119,43 @@ struct DraftStore {
         DraftStore(directory: .temporaryDirectory.appending(path: "FolioDrafts-\(UUID().uuidString)", directoryHint: .isDirectory))
     }
     
-    func save<T: Encodable>(_ draft: T, key: String) {
-        guard let data = try? JSONEncoder().encode(draft) else { return }
-        
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? data.write(to: url(for: key), options: .atomic)
+    func save<T: Encodable>(_ draft: T, key: String) throws(DraftError) {
+        do {
+            let data = try JSONEncoder().encode(draft)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: url(for: key), options: .atomic)
+        } catch {
+            throw .couldNotSave(error)
+        }
     }
     
-    func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
-        guard let data = try? Data(contentsOf: url(for: key)) else { return nil }
+    /// The saved draft, or `nil` if there isn't one. A draft that can't be read is moved aside and reported, rather than treated as missing and later overwritten.
+    func load<T: Decodable>(_ type: T.Type, key: String) throws(DraftError) -> T? {
+        let url = url(for: key)
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return nil }
         
-        return try? JSONDecoder().decode(type, from: data)
+        do {
+            return try JSONDecoder().decode(type, from: Data(contentsOf: url))
+        } catch {
+            let keptAt = directory.appending(path: "\(key).unreadable-\(Int(Date.now.timeIntervalSince1970)).json")
+            let moved = (try? FileManager.default.moveItem(at: url, to: keptAt)) != nil
+            throw .unreadable(error, keptAt: moved ? keptAt : nil)
+        }
     }
     
     func contains(key: String) -> Bool {
         FileManager.default.fileExists(atPath: url(for: key).path(percentEncoded: false))
     }
     
-    func clear(key: String) {
-        try? FileManager.default.removeItem(at: url(for: key))
+    /// Deletes the draft. Deleting one that isn't there isn't an error.
+    func clear(key: String) throws(DraftError) {
+        guard contains(key: key) else { return }
+        
+        do {
+            try FileManager.default.removeItem(at: url(for: key))
+        } catch {
+            throw .couldNotDelete(error)
+        }
     }
     
     private func url(for key: String) -> URL {

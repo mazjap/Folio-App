@@ -1,8 +1,8 @@
 import SwiftUI
-import Textual
 
 struct PostEditorView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var vm: PostEditorViewModel
     private let onSave: (PostPreview) -> Void
     private let onDelete: () -> Void
@@ -22,17 +22,32 @@ struct PostEditorView: View {
     
     var body: some View {
         VStack(spacing: 0) {
+            LoadProblemBanner(state: vm.loadState, itemKind: "post") {
+                Task { await vm.load() }
+            }
             headerFields
             Divider()
             editorOrPreview
         }
+        .disabled(vm.loadState == .loading)
+        .overlay {
+            LoadStateOverlay(state: vm.loadState, itemKind: "post") {
+                Task { await vm.load() }
+            }
+        }
         .navigationTitle(vm.title.isEmpty ? "New Post" : vm.title)
+        .navigationSubtitle(vm.environment.longTitle)
+        .toolbarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .inspector(isPresented: $showInspector) {
             inspectorContent
         }
         .task { await vm.load() }
         .onDisappear { vm.saveDraftNow() }
+        .onChange(of: scenePhase) {
+            // NOTE: - The app can be suspended or quit from the background without the editor disappearing, so save before that.
+            if scenePhase != .active { vm.saveDraftNow() }
+        }
         .onChange(of: showDiff) {
             diffRanges = showDiff ? vm.computeDiffRanges() : []
         }
@@ -57,12 +72,12 @@ struct PostEditorView: View {
             }
         }
         .errorAlert($vm.error)
-        .staleDraftAlert(isPresented: $vm.isDraftStale, itemKind: "post", onKeep: vm.keepStaleDraft, onDiscard: vm.discardDraft)
-        .confirmationDialog("Delete \"\(vm.title)\"?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) { Task { await vm.delete() } }
+        .staleDraftAlert(isPresented: $vm.isDraftStale, itemKind: "post", isLegacy: vm.isDraftLegacy, onKeep: vm.keepStaleDraft, onDiscard: vm.discardDraft)
+        .confirmationDialog("Delete “\(vm.title)”?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Delete Post", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This cannot be undone.")
+            Text("This deletes it from \(vm.environment.longTitle), along with its unpublished draft. It can't be undone.")
         }
         .confirmationDialog("Discard draft?", isPresented: $showDiscardDraftConfirm, titleVisibility: .visible) {
             Button("Discard", role: .destructive) { vm.discardDraft() }
@@ -77,15 +92,17 @@ struct PostEditorView: View {
     private var headerFields: some View {
         VStack(alignment: .leading, spacing: 0) {
             TextField("Title", text: $vm.title)
-                .font(.title2.bold())
+                .font(.title.bold())
+                .textFieldStyle(.plain)
                 .padding(.horizontal)
-                .padding(.top, 12)
-                .padding(.bottom, 6)
+                .padding(.top, 16)
+                .padding(.bottom, 4)
             
             if case .create = vm.mode {
-                TextField("id-slug", text: $vm.id)
-                    .font(.caption)
+                TextField("url-slug", text: $vm.id)
+                    .font(.callout.monospaced())
                     .foregroundStyle(.secondary)
+                    .textFieldStyle(.plain)
                     .padding(.horizontal)
                     .padding(.bottom, 6)
                     #if !os(macOS)
@@ -94,16 +111,37 @@ struct PostEditorView: View {
                     #endif
                     .disabled(vm.hasUploadedFiles)
                     .help(vm.hasUploadedFiles ? "Images are uploaded under this ID, so it can't change." : "")
+                
+                if !vm.currentID.isEmpty {
+                    Text("Published at /blog/\(vm.currentID)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
+                        .padding(.bottom, 6)
+                }
             }
             
-            TextField("Excerpt — shown in the post list", text: $vm.excerpt, axis: .vertical)
-                .font(.subheadline)
+            TextField("Excerpt, shown in the post list", text: $vm.excerpt, axis: .vertical)
+                .font(.body)
                 .foregroundStyle(.secondary)
-                .lineLimit(2...4)
+                .textFieldStyle(.plain)
+                .lineLimit(1...4)
                 .padding(.horizontal)
                 .padding(.bottom, 12)
+            
+            ValidationIssuesView(issues: vm.loadState == .loaded ? vm.validationIssues : [])
+                .padding(.horizontal)
+                .padding(.bottom, vm.validationIssues.isEmpty ? 0 : 12)
         }
         .background(.background)
+    }
+    
+    private var inspectorSystemImage: String {
+        #if os(macOS)
+        "sidebar.right"
+        #else
+        "info.circle"
+        #endif
     }
     
     // MARK: - Editor / Preview
@@ -112,9 +150,9 @@ struct PostEditorView: View {
     private var editorOrPreview: some View {
         if showPreview {
             ScrollView {
-                StructuredText(markdown: vm.content.isEmpty ? "*Nothing to preview yet.*" : resolveMarkdownImageURLs(vm.content))
-                    .textual.structuredTextStyle(.gitHub)
+                MarkdownPreview(markdown: vm.content)
                     .padding()
+                    .frame(maxWidth: .infinity)
             }
         } else {
             VStack(spacing: 0) {
@@ -125,6 +163,7 @@ struct PostEditorView: View {
                 }
                 Divider()
                 MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction, highlightRanges: (showDiff && vm.hasDraft) ? diffRanges : [])
+                    .padding(.horizontal, 8)
             }
         }
     }
@@ -133,45 +172,31 @@ struct PostEditorView: View {
     
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button("Publish", systemImage: "square.and.arrow.up") {
-                Task { await vm.save() }
-            }
-            .disabled(vm.title.isEmpty || vm.currentID.isEmpty || vm.isSaving)
-            .keyboardShortcut("s", modifiers: .command)
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Toggle("Preview", systemImage: showPreview ? "pencil" : "eye", isOn: $showPreview)
-                .toggleStyle(.button)
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button("Inspector", systemImage: "sidebar.right") {
-                showInspector.toggle()
+        if vm.draftSession.isFailing {
+            ToolbarItem(placement: .primaryAction) {
+                DraftNotSavedLabel()
             }
         }
         if vm.hasDraft {
             ToolbarItem(placement: .primaryAction) {
-                Toggle("Show Changes", systemImage: "highlighter", isOn: $showDiff)
-                    .toggleStyle(.button)
-                    .help("Highlight lines changed since last publish")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button("Discard Draft", systemImage: "arrow.counterclockwise") {
+                DraftMenu(isShowingChanges: $showDiff) {
                     showDiscardDraftConfirm = true
                 }
-                .foregroundStyle(.orange)
-                .help("Revert to last published version")
             }
         }
-        if vm.isSaving {
-            ToolbarItem(placement: .status) {
-                ProgressView()
+        ToolbarItemGroup(placement: .primaryAction) {
+            Toggle("Preview", systemImage: "eye", isOn: $showPreview)
+                .help("Preview the rendered post")
+            Button("Details", systemImage: inspectorSystemImage) {
+                showInspector.toggle()
             }
+            .help("Show or hide the post's details")
         }
-        ToolbarItem(placement: .status) {
-            Text("\(vm.estimatedReadingTime) min read")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        ToolbarSpacer(.fixed, placement: .primaryAction)
+        ToolbarItem(placement: .primaryAction) {
+            SaveToolbarButton("Publish", isSaving: vm.isSaving, isDisabled: !vm.canSave) {
+                Task { await vm.save() }
+            }
         }
     }
     
@@ -184,40 +209,40 @@ struct PostEditorView: View {
             }
             
             Section("Metadata") {
-                TextField("Series", text: $vm.series, prompt: Text("Optional series name"))
+                LabeledTextField("Series", text: $vm.series, prompt: "None")
                 TagsField(tags: $vm.tags)
+                LabeledContent("Reading Time", value: "\(vm.estimatedReadingTime) min")
             }
             
-            if vm.createdAt != nil {
-                Section("Dates") {
-                    DatePicker(
-                        "Published",
-                        selection: Binding(
-                            get: { vm.createdAt ?? .now },
-                            set: { vm.createdAt = $0 }
-                        ),
-                        displayedComponents: .date
-                    )
-                    if let updatedAt = vm.updatedAt {
-                        LabeledContent("Updated") {
-                            Text(updatedAt.formatted(date: .abbreviated, time: .omitted))
-                        }
+            Section("Dates") {
+                // NOTE: - A new post shows today until a date is picked, and is published with the date shown.
+                DatePicker(
+                    "Published",
+                    selection: Binding(
+                        get: { vm.createdAt ?? .now },
+                        set: { vm.createdAt = $0 }
+                    ),
+                    displayedComponents: .date
+                )
+                if let updatedAt = vm.updatedAt {
+                    LabeledContent("Updated") {
+                        Text(updatedAt.formatted(date: .abbreviated, time: .omitted))
                     }
                 }
             }
             
             if case .edit = vm.mode {
                 Section {
-                    Button("Delete Post", role: .destructive) {
+                    Button("Delete Post…", role: .destructive) {
                         showDeleteConfirm = true
                     }
+                    .disabled(vm.isSaving || vm.loadState != .loaded)
                     .keyboardShortcut(.delete, modifiers: .command)
                 }
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Inspector")
-        .inspectorColumnWidth(min: 200, ideal: 240, max: 320)
+        .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
     }
 }
 

@@ -87,6 +87,12 @@ final class TestPostRepository: PostRepositoryProtocol {
     var posts: [PostDetail]
     /// When set, `fetchPost(withId:)` throws it.
     var fetchError: APIError?
+    /// When set, `fetchPosts()` throws it.
+    var listError: APIError?
+    /// Runs before `fetchPosts()` returns, so a test can hold a load open.
+    var beforeList: (() async -> Void)?
+    /// Runs before a create or update is applied, so a test can act while a save is in flight.
+    var beforeWrite: (() async -> Void)?
     /// The `updatedAt` the "server" gives an updated post.
     var updateDate = Date.sampleDate.addingTimeInterval(3600)
     private(set) var updates: [(id: String, fields: PostUpdate)] = []
@@ -97,7 +103,11 @@ final class TestPostRepository: PostRepositoryProtocol {
     }
     
     func fetchPosts() async throws(APIError) -> [PostPreview] {
-        posts.map(\.preview)
+        let result = posts.map(\.preview)
+        await beforeList?()
+        if let listError { throw listError }
+        
+        return result
     }
     
     func fetchPostNavs() async throws(APIError) -> [PostNav] {
@@ -112,6 +122,7 @@ final class TestPostRepository: PostRepositoryProtocol {
     }
     
     func createPost(_ post: PostDetail) async throws(APIError) -> PostDetail {
+        await beforeWrite?()
         guard !posts.contains(where: { $0.id == post.id }) else { throw .conflict }
         
         posts.append(post)
@@ -119,6 +130,7 @@ final class TestPostRepository: PostRepositoryProtocol {
     }
     
     func updatePost(id: String, fields: PostUpdate) async throws(APIError) -> PostDetail {
+        await beforeWrite?()
         guard let index = posts.firstIndex(where: { $0.id == id }) else { throw .notFound }
         
         updates.append((id, fields))

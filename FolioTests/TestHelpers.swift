@@ -4,6 +4,41 @@ import Foundation
 /// A small image to upload in tests.
 let sampleImage = PendingImage(data: Data([0xFF, 0xD8, 0xFF]), mimeType: "image/jpeg", ext: "jpg")
 
+/// Holds a fake's request open until the test calls `open()`, so the test can act while it's in flight.
+@MainActor
+final class Gate {
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var arrival: CheckedContinuation<Void, Never>?
+    private var hasArrived = false
+    
+    /// Called by the fake: waits until the gate opens.
+    func wait() async {
+        hasArrived = true
+        arrival?.resume()
+        arrival = nil
+        await withCheckedContinuation { waiter = $0 }
+    }
+    
+    /// Waits until the request reaches the gate.
+    func untilArrived() async {
+        guard !hasArrived else { return }
+        
+        await withCheckedContinuation { arrival = $0 }
+    }
+    
+    func open() {
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
+/// Settings for the given environment, in a user defaults domain of their own.
+func makeUserDefaults(environment: FolioEnvironment) -> UserDefaults {
+    let defaults = makeUserDefaults()
+    defaults.set(environment.rawValue, forKey: FolioStorageKey.activeEnvironment)
+    return defaults
+}
+
 /// A user defaults domain of its own, so tests don't read or change the app's settings.
 func makeUserDefaults() -> UserDefaults {
     let suiteName = "FolioTests-\(UUID().uuidString)"

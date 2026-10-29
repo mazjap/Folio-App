@@ -125,7 +125,7 @@ struct URLProcessor {
         }
         
         guard let http = response as? HTTPURLResponse else {
-            throw .httpError(statusCode: -1)
+            throw .httpError(statusCode: -1, message: nil)
         }
         
         switch http.statusCode {
@@ -133,8 +133,21 @@ struct URLProcessor {
         case 401: throw .unauthorized
         case 404: throw .notFound
         case 409: throw .conflict
-        default: throw .httpError(statusCode: http.statusCode)
+        default: throw .httpError(statusCode: http.statusCode, message: Self.serverMessage(in: data))
         }
+    }
+    
+    /// The `error` text of a JSON error response (`{ "error": "tagline can't be empty" }`), shortened if it's very long. `nil` when the body isn't one.
+    static func serverMessage(in data: Data) -> String? {
+        struct ErrorBody: Decodable {
+            let error: String
+        }
+        
+        guard let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error.trimmingCharacters(in: .whitespacesAndNewlines),
+              !message.isEmpty
+        else { return nil }
+        
+        return message.count > 500 ? String(message.prefix(500)) + "…" : message
     }
 }
 
@@ -142,12 +155,17 @@ struct URLProcessor {
 
 extension URLProcessor {
     static func fromSettings(_ settings: ServerSettings = ServerSettings()) throws(APIError) -> URLProcessor {
-        let urlString = settings.baseURLString
-        guard !urlString.isEmpty, let url = URL(string: urlString) else {
+        guard case let .success(urlString) = ServerURL.normalize(settings.baseURLString),
+              let url = URL(string: urlString)
+        else {
             throw .invalidURL
         }
         
-        return URLProcessor(baseURL: url, apiKey: settings.apiKey)
+        do {
+            return URLProcessor(baseURL: url, apiKey: try settings.apiKey())
+        } catch {
+            throw .keychain(error)
+        }
     }
 }
 
@@ -165,15 +183,49 @@ func mediaURL(for path: String, baseURL: String = ServerSettings().baseURLString
     return URL(string: trimmedBase + trimmedPath)
 }
 
-/// Rewrites `![alt](/relative/path)` image references in markdown to use the full base URL,
-/// so StructuredText (Textual) can load them. Already-absolute URLs pass through unchanged.
+/// The path of a smaller copy of an uploaded image, which the server saves beside it (`/media/…/hero.webp` → `/media/…/hero.w640.webp`), or `nil` for paths that don't have one (anything but a server `.webp`).
+///
+/// Images uploaded before the server made smaller copies don't have them until it backfills them, so fall back to `path` if this doesn't load.
+func smallerMediaPath(for path: String, width: Int) -> String? {
+    guard path.hasPrefix("/media/"), path.hasSuffix(".webp"), path.range(of: #"\.w\d+\.webp$"#, options: .regularExpression) == nil else { return nil }
+    
+    return String(path.dropLast(".webp".count)) + ".w\(width).webp"
+}
+
+/// Rewrites relative image references in markdown (`![alt](/media/…)` and reference definitions like `[hero]: /media/…`) to use the full base URL, so StructuredText (Textual) can load them.
+///
+/// Already-absolute URLs pass through unchanged, as does anything inside fenced code blocks or inline code, which shows markdown rather than rendering it.
 func resolveMarkdownImageURLs(_ content: String, baseURL: String = ServerSettings().baseURLString) -> String {
     guard !baseURL.isEmpty,
-          let regex = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\((/[^)]*)\)"#)
+          let inlineImage = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\((/[^/)][^)]*)\)"#),
+          let referenceDefinition = try? NSRegularExpression(pattern: #"^( {0,3}\[[^\]]+\]:[ \t]*)(/[^/\s]\S*)"#)
     else { return content }
     
-    let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    let range = NSRange(content.startIndex..., in: content)
-    let template = "![$1](\(NSRegularExpression.escapedTemplate(for: trimmedBase))$2)"
-    return regex.stringByReplacingMatches(in: content, range: range, withTemplate: template)
+    let base = NSRegularExpression.escapedTemplate(for: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    
+    func replacing(_ regex: NSRegularExpression, in text: String, with template: String) -> String {
+        regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
+    }
+    
+    var openFence: String?
+    let lines = content.components(separatedBy: "\n").map { line -> String in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if let fence = openFence {
+            if trimmed.hasPrefix(fence) { openFence = nil }
+            return line
+        }
+        if let fence = ["```", "~~~"].first(where: trimmed.hasPrefix) {
+            openFence = fence
+            return line
+        }
+        
+        let resolvedDefinition = replacing(referenceDefinition, in: line, with: "$1\(base)$2")
+        // NOTE: - Splitting on backticks leaves inline code at the odd-numbered pieces.
+        return resolvedDefinition
+            .components(separatedBy: "`")
+            .enumerated()
+            .map { index, piece in index.isMultiple(of: 2) ? replacing(inlineImage, in: piece, with: "![$1](\(base)$2)") : piece }
+            .joined(separator: "`")
+    }
+    return lines.joined(separator: "\n")
 }

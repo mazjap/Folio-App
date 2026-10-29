@@ -8,6 +8,10 @@ struct HeroImageRow: View {
     private let uploadsOn: String
     
     @State private var pickerItem: PhotosPickerItem?
+    @State private var isImporting = false
+    @State private var importError: PendingImage.ImportError?
+    /// A small copy of the picked image, made once rather than decoding the full image on every update.
+    @State private var pendingPreview: Image?
     
     /// - Parameter uploadsOn: When a picked image is uploaded, as the save button calls it ("save", "publish").
     init(heroImage: Binding<String>, pendingHeroImage: Binding<PendingImage?>, uploadsOn: String) {
@@ -19,56 +23,112 @@ struct HeroImageRow: View {
     var body: some View {
         let hasHeroImage = pendingHeroImage != nil || !heroImage.isEmpty
         
-        if pendingHeroImage != nil {
-            Label("Image selected · uploads on \(uploadsOn)", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.callout)
-        } else if let heroURL = mediaURL(for: heroImage) {
-            AsyncImage(url: heroURL) { image in
-                image.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Color.secondary.opacity(0.15)
-            }
-            .frame(height: 80)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        
-        HStack(spacing: 8) {
-            PhotosPicker(selection: $pickerItem, matching: .images) {
-                Label(hasHeroImage ? "Change Hero Image" : "Set Hero Image", systemImage: "photo.badge.plus")
-            }
-            .onChange(of: pickerItem) { _, item in
-                guard let item else { return }
-                
-                Task {
-                    if let image = await PendingImage.load(from: item) {
-                        pendingHeroImage = image
+        VStack(alignment: .leading, spacing: 8) {
+            preview
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .frame(maxWidth: 420)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    if isImporting {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(.thinMaterial)
                     }
-                    pickerItem = nil
                 }
-            }
+                .overlay(alignment: .bottomLeading) {
+                    if pendingHeroImage != nil {
+                        Text("Uploads on \(uploadsOn)")
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.thinMaterial, in: Capsule())
+                            .padding(8)
+                    }
+                }
             
-            if hasHeroImage {
-                Spacer()
-                
-                Button("Clear", role: .destructive) {
-                    pendingHeroImage = nil
-                    heroImage = ""
+            HStack(spacing: 12) {
+                PhotosPicker(selection: $pickerItem, matching: .images) {
+                    Text(hasHeroImage ? "Replace" : "Choose Image")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.red)
+                .onChange(of: pickerItem) { _, item in
+                    guard let item else { return }
+                    
+                    pickerItem = nil
+                    importImage { () throws(PendingImage.ImportError) in try await PendingImage.load(from: item) }
+                }
+                
+                #if os(macOS)
+                Button("From Files…") {
+                    guard let url = PendingImage.chooseFiles().first else { return }
+                    
+                    importImage { () throws(PendingImage.ImportError) in try await PendingImage.load(contentsOf: url) }
+                }
+                #endif
+                
+                Spacer(minLength: 0)
+                
+                if hasHeroImage {
+                    Button("Remove", role: .destructive) {
+                        pendingHeroImage = nil
+                        heroImage = ""
+                    }
+                    .foregroundStyle(.red)
+                }
             }
+            .buttonStyle(.borderless)
+            .font(.callout)
+            .disabled(isImporting)
         }
-        
-        #if os(macOS)
-        Button("Select from Files…") {
-            if let image = PendingImage.chooseFiles().first {
-                pendingHeroImage = image
+        .onChange(of: pendingHeroImage, initial: true) {
+            pendingPreview = pendingHeroImage?.thumbnail(maxPixelSize: 840).map { Image(decorative: $0, scale: 1) }
+        }
+        .errorAlert($importError)
+    }
+    
+    /// Prepares the picked image for upload (converting formats the server can't), and shows why if it can't be used.
+    private func importImage(_ load: @escaping () async throws(PendingImage.ImportError) -> PendingImage) {
+        isImporting = true
+        Task {
+            do throws(PendingImage.ImportError) {
+                pendingHeroImage = try await load()
+            } catch {
+                importError = error
             }
+            isImporting = false
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.tint)
-        #endif
+    }
+    
+    @ViewBuilder
+    private var preview: some View {
+        if pendingHeroImage != nil, let pendingPreview {
+            pendingPreview.resizable().aspectRatio(contentMode: .fill)
+        } else if let heroURL = mediaURL(for: heroImage) {
+            AsyncImage(url: heroURL) { phase in
+                if case let .success(image) = phase {
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    placeholder(systemImage: phase.error == nil ? "photo" : "exclamationmark.triangle", text: phase.error == nil ? nil : "Couldn't load the image")
+                }
+            }
+        } else {
+            placeholder(systemImage: "photo", text: "No hero image")
+        }
+    }
+    
+    private func placeholder(systemImage: String, text: String?) -> some View {
+        Rectangle()
+            .fill(.fill.tertiary)
+            .overlay {
+                VStack(spacing: 4) {
+                    Image(systemName: systemImage)
+                        .font(.title2)
+                    if let text {
+                        Text(text)
+                            .font(.caption)
+                    }
+                }
+                .foregroundStyle(.secondary)
+            }
     }
 }
 

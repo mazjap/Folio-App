@@ -145,11 +145,14 @@ struct MarkdownEditorView: NSViewRepresentable {
 struct MarkdownEditorView: UIViewRepresentable {
     @Binding var text: String
     @Binding var pendingAction: EditorAction?
+    /// Ignored on iOS, which doesn't highlight changes (`DraftMenu` doesn't offer it there).
     var highlightRanges: [NSRange] = []
     
     func makeUIView(context: Context) -> UITextView {
         let tv = UITextView()
-        tv.font = .monospacedSystemFont(ofSize: UIFont.systemFontSize, weight: .regular)
+        // NOTE: - Scaled with the body text style, so the editor follows Dynamic Type.
+        tv.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .monospacedSystemFont(ofSize: 16, weight: .regular))
+        tv.adjustsFontForContentSizeCategory = true
         tv.backgroundColor = .clear
         tv.autocorrectionType = .no
         tv.autocapitalizationType = .none

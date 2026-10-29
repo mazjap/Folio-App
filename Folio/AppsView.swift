@@ -22,13 +22,14 @@ class AppsViewModel {
     
     func addApp(id: String) {
         let slug = id.slugified
-        guard !slug.isEmpty, !apps.contains(where: { $0.id == slug }) else { return }
+        guard ContentRules.slugIssue(for: id, reservesNames: false) == nil, !apps.contains(where: { $0.id == slug }) else { return }
         
         apps.append(AppRecord(id: slug))
         persist()
     }
     
-    func delete(app: AppRecord) {
+    /// Removes the app from this device's list. Its pages stay on the site.
+    func remove(app: AppRecord) {
         apps.removeAll { $0.id == app.id }
         persist()
     }
@@ -56,14 +57,26 @@ struct AppsView: View {
         NavigationStack {
             List(selection: $selectedAppID) {
                 ForEach(vm.apps) { app in
-                    Text(app.id)
+                    Label(app.id, systemImage: "app.dashed")
                         .tag(app.id)
                         .contextMenu {
-                            Button("Delete", systemImage: "trash", role: .destructive) {
+                            // NOTE: - The list is only bookmarks on this device: removing one leaves the app's pages on the site.
+                            Button("Remove from List", systemImage: "minus.circle") {
                                 if selectedAppID == app.id { selectedAppID = nil }
-                                vm.delete(app: app)
+                                vm.remove(app: app)
                             }
                         }
+                }
+            }
+            .overlay {
+                if vm.apps.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Apps", systemImage: "square.grid.2x2")
+                    } description: {
+                        Text("Add an app's URL slug to edit its privacy policy and support pages.")
+                    } actions: {
+                        Button("Add App") { showAddAlert = true }
+                    }
                 }
             }
             .navigationTitle("Apps")

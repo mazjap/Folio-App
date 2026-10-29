@@ -1,120 +1,92 @@
 import SwiftUI
 
-@Observable
-class AppPrivacyPolicyEditorViewModel {
-    let appId: String
-    var appName: String
-    var lastUpdated: Date
-    var content: String
-    var contactUrl: String
-    var contactText: String
-    var pendingAction: EditorAction?
-    
-    var isSaving = false
-    var error: APIError?
-    var saved: AppPrivacyPolicy?
-    var deleted = false
-    
-    let isEditing: Bool
-    @ObservationIgnored private let repo: any AppsRepositoryProtocol
-    
-    private static let dateFormatter: DateFormatter = {
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd"
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.timeZone = TimeZone(secondsFromGMT: 0)
-        return df
-    }()
-    
-    init(appId: String, existing: AppPrivacyPolicy?, repo: any AppsRepositoryProtocol = AppsRepository()) {
-        self.appId = appId
-        self.repo = repo
-        self.isEditing = existing != nil
-        self.appName = existing?.appName ?? ""
-        self.lastUpdated = existing.flatMap { Self.dateFormatter.date(from: $0.lastUpdated) } ?? Date()
-        self.content = existing?.content ?? ""
-        self.contactUrl = existing?.contactUrl ?? ""
-        self.contactText = existing?.contactText ?? ""
-    }
-    
-    func save() async {
-        isSaving = true
-        defer { isSaving = false }
-        let policy = AppPrivacyPolicy(
-            id: appId,
-            appName: appName,
-            lastUpdated: Self.dateFormatter.string(from: lastUpdated),
-            content: content,
-            contactUrl: contactUrl.isEmpty ? nil : contactUrl,
-            contactText: contactText.isEmpty ? nil : contactText
-        )
-        do {
-            saved = try await isEditing ? repo.updatePrivacyPolicy(policy) : repo.createPrivacyPolicy(policy)
-        } catch {
-            self.error = error
-        }
-    }
-    
-    func delete() async {
-        isSaving = true
-        defer { isSaving = false }
-        do {
-            try await repo.deletePrivacyPolicy(appId: appId)
-            deleted = true
-        } catch {
-            self.error = error
-        }
-    }
-}
-
 struct AppPrivacyPolicyEditorView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var vm: AppPrivacyPolicyEditorViewModel
     private let onSave: (AppPrivacyPolicy) -> Void
     private let onDelete: () -> Void
     
     @State private var showDeleteConfirm = false
+    @State private var showDiscardDraftConfirm = false
+    @State private var showPreview = false
     
-    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository(), existing: AppPrivacyPolicy?, onSave: @escaping (AppPrivacyPolicy) -> Void, onDelete: @escaping () -> Void) {
-        self._vm = State(initialValue: AppPrivacyPolicyEditorViewModel(appId: appId, existing: existing, repo: repo))
+    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository(), drafts: DraftStore = .live, existing: AppPrivacyPolicy?, onSave: @escaping (AppPrivacyPolicy) -> Void, onDelete: @escaping () -> Void) {
+        self._vm = State(initialValue: AppPrivacyPolicyEditorViewModel(appId: appId, existing: existing, repo: repo, drafts: drafts))
         self.onSave = onSave
         self.onDelete = onDelete
     }
     
     var body: some View {
         Form {
+            if !vm.validationIssues.isEmpty {
+                Section {
+                    ValidationIssuesView(issues: vm.validationIssues)
+                }
+            }
+            
             Section("App Info") {
-                TextField("App Name", text: $vm.appName)
-                DatePicker("Last Updated", selection: $vm.lastUpdated, displayedComponents: .date)
+                LabeledTextField("App Name", text: $vm.appName)
+                DatePicker(
+                    "Last Updated",
+                    selection: Binding(
+                        get: { vm.lastUpdated },
+                        set: { vm.lastUpdated = $0.calendarDay(in: .gmt) }
+                    ),
+                    displayedComponents: .date
+                )
+                // NOTE: - The date is a calendar day stored as midnight UTC, so it's shown in UTC to match what's saved.
+                .environment(\.timeZone, .gmt)
             }
             
             Section("Content") {
-                MarkdownToolbar(pendingAction: $vm.pendingAction)
-                MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
-                    .frame(minHeight: 200)
+                if showPreview {
+                    MarkdownPreview(markdown: vm.content)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    MarkdownToolbar(pendingAction: $vm.pendingAction)
+                    MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
+                        .frame(minHeight: 200)
+                }
             }
             
-            Section("Contact (optional)") {
-                TextField("Contact URL", text: $vm.contactUrl, prompt: Text("https://…"))
+            Section {
+                LabeledTextField("Contact URL", text: $vm.contactUrl, prompt: "https://… or mailto:…")
                     .textContentType(.URL)
                     #if !os(macOS)
                     .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
                     #endif
-                TextField("Contact label", text: $vm.contactText, prompt: Text("Contact Support"))
+                LabeledTextField("Contact Button Title", text: $vm.contactText, prompt: "Contact Support")
+            } header: {
+                Text("Contact")
+            } footer: {
+                Text("Optional. Shown as a button at the end of the page.")
             }
             
             if vm.isEditing {
                 Section {
-                    Button("Delete Privacy Policy", role: .destructive) {
+                    Button("Delete Privacy Policy…", role: .destructive) {
                         showDeleteConfirm = true
                     }
                     .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(vm.isSaving)
                 }
             }
         }
         .formStyle(.grouped)
+        // NOTE: - Saving closes the editor, so it's not edited while a save is in flight.
+        .disabled(vm.isSaving)
         .navigationTitle(vm.isEditing ? "Privacy Policy" : "New Privacy Policy")
+        .navigationSubtitle(vm.environment.longTitle)
+        .toolbarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
+        .onAppear { vm.load() }
+        .onDisappear { vm.saveDraftNow() }
+        .onChange(of: scenePhase) {
+            if scenePhase != .active { vm.saveDraftNow() }
+        }
         .onChange(of: vm.saved) { _, policy in
             if let policy {
                 onSave(policy)
@@ -129,30 +101,48 @@ struct AppPrivacyPolicyEditorView: View {
         }
         .errorAlert($vm.error)
         .confirmationDialog("Delete privacy policy?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) { Task { await vm.delete() } }
+            Button("Delete Privacy Policy", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This cannot be undone.")
+            Text("This deletes it from \(vm.environment.longTitle), and links to it from the App Store stop working. It can't be undone.")
+        }
+        .confirmationDialog("Discard draft?", isPresented: $showDiscardDraftConfirm, titleVisibility: .visible) {
+            Button("Discard", role: .destructive) { vm.discardDraft() }
+            Button("Keep editing", role: .cancel) {}
+        } message: {
+            Text("Reverts to the saved version.")
         }
     }
     
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        if vm.draftSession.isFailing {
+            ToolbarItem(placement: .primaryAction) {
+                DraftNotSavedLabel()
+            }
+        }
+        if vm.hasDraft {
+            ToolbarItem(placement: .primaryAction) {
+                DraftMenu {
+                    showDiscardDraftConfirm = true
+                }
+            }
+        }
         ToolbarItem(placement: .primaryAction) {
-            Button(vm.isEditing ? "Save" : "Create", systemImage: "square.and.arrow.up") {
+            Toggle("Preview", systemImage: "eye", isOn: $showPreview)
+                .help("Preview the rendered policy")
+        }
+        ToolbarSpacer(.fixed, placement: .primaryAction)
+        ToolbarItem(placement: .primaryAction) {
+            SaveToolbarButton(vm.isEditing ? "Save" : "Create", isSaving: vm.isSaving, isDisabled: !vm.canSave) {
                 Task { await vm.save() }
             }
-            .disabled(vm.appName.isEmpty || vm.isSaving)
-            .keyboardShortcut("s", modifiers: .command)
-        }
-        if vm.isSaving {
-            ToolbarItem(placement: .status) { ProgressView() }
         }
     }
 }
 
 #Preview {
     NavigationStack {
-        AppPrivacyPolicyEditorView(appId: AppPrivacyPolicy.sample.id, repo: TestAppsRepository(), existing: .sample, onSave: { _ in }, onDelete: {})
+        AppPrivacyPolicyEditorView(appId: AppPrivacyPolicy.sample.id, repo: TestAppsRepository(), drafts: .temporary(), existing: .sample, onSave: { _ in }, onDelete: {})
     }
 }

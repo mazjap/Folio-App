@@ -94,24 +94,30 @@ Folio/
 │   ├── View+ErrorAlert.swift        .errorAlert($vm.error)
 │   ├── View+StaleDraftAlert.swift   Keep / discard a draft older than the server's version
 │   ├── URLRequest+HTTPMethod.swift  URLRequest.httpMethodType
+│   ├── Array+Move.swift             Gallery reordering (move onto a target, move up/down)
+│   ├── Date+CalendarDay.swift       Date-only values as midnight UTC
 │   └── Date+Sample.swift            Date.sampleDate for sample data
 │
 ├── APIError.swift                   Error enum used by all repository calls
-├── ServerSettings.swift             FolioStorageKey, FolioEnvironment, ServerSettings
+├── ServerSettings.swift             FolioStorageKey, FolioEnvironment, ServerSettings, ServerURL (base URL checks)
+├── ContentRules.swift               The server's validation rules, checked before saving
 ├── KeychainService.swift            KeychainStoring, KeychainService, TestKeychain
 ├── URLProcessor.swift               HTTP client, JSON coder, apiURL, media URL helpers
-├── DraftStore.swift                 EditorDraft, PostDraft, ProjectDraft, DraftStore, line diff
-├── DraftSession.swift               One editor's draft: baseline, debounced save, staleness
-├── PendingImage.swift               Not-yet-uploaded image + loading from Photos / Files
+├── DraftStore.swift                 EditorDraft, the four draft types, DraftStore, line diff
+├── DraftSession.swift               One editor's draft: baseline, debounced save, staleness, legacy and offline restore
+├── EditorLoadState.swift            loading / loaded / failed, shared by the post and project editors
+├── PendingImage.swift               Not-yet-uploaded image: loading from Photos / Files, conversion to a format the server takes
 │
 ├── ProjectRepository.swift          Projects CRUD, ProjectUpdate, TestProjectRepository, ProjectDetail.sample
 ├── PostRepository.swift             Posts CRUD, PostUpdate, TestPostRepository, PostDetail.sample
 ├── MediaRepository.swift            Upload / delete, deleteUnusedFiles, TestMediaRepository
-├── AppsRepository.swift             App pages CRUD, TestAppsRepository, samples
+├── AppsRepository.swift             App pages CRUD, AppPrivacyPolicyUpdate, AppSupportUpdate, TestAppsRepository, samples
 │
 ├── ContentListViewModel.swift       Generic list VM; PostsViewModel / ProjectsViewModel typealiases
 ├── ProjectFormViewModel.swift       Edit/Create VM for a single project
 ├── PostEditorViewModel.swift        Edit/Create VM for a single post
+├── AppPrivacyPolicyEditorViewModel.swift
+├── AppSupportEditorViewModel.swift
 │
 ├── ContentView.swift                Root TabView (.sidebarAdaptable)
 ├── ProjectsView.swift               List + NavigationStack for projects
@@ -124,8 +130,14 @@ Folio/
 ├── MediaManagerView.swift           Drag-to-reorder project gallery
 ├── MarkdownEditorView.swift         NSViewRepresentable / UIViewRepresentable text editor
 ├── MarkdownToolbar.swift            Formatting toolbar, MarkdownToolbarLabel, InsertImageButtons
+├── MarkdownPreview.swift            Rendered markdown (Textual) for every editor's Preview
+├── EditorStatusViews.swift          LoadStateOverlay, LoadProblemBanner, DraftNotSavedLabel
+├── ValidationIssuesView.swift       Why an editor can't save yet
+├── DraftMenu.swift                  Toolbar menu for an unpublished draft
+├── SaveToolbarButton.swift          Prominent Save / Publish button
+├── ContentListOverlay.swift         Spinner / error / empty state for the lists
 ├── AppsView.swift                   Apps list + AppsViewModel (UserDefaults-backed)
-├── AppDetailView.swift              Per-app detail: links to privacy + support editors
+├── AppDetailView.swift              Per-app detail: links to privacy + support editors, load errors with Try Again
 ├── AppPrivacyPolicyEditorView.swift
 ├── AppSupportEditorView.swift
 └── SettingsView.swift               SettingsViewModel + Dev/Prod environment picker, URL/key entry
@@ -153,7 +165,17 @@ All constants live in `FolioStorageKey` (in `ServerSettings.swift`); `FolioEnvir
 
 ### How the active environment is resolved
 
-`ServerSettings` reads the active `FolioEnvironment` from UserDefaults and returns its base URL (`baseURLString`) and API key (`apiKey`, from the Keychain). It reads fresh on every access. `URLProcessor.fromSettings()` and the URL helper functions (`mediaURL(for:)`, `resolveMarkdownImageURLs(_:)`) use it by default, so switching the picker in Settings takes effect immediately for all subsequent requests; no restart required. The helpers take a `baseURL:` argument so tests don't depend on settings.
+`ServerSettings` reads the active `FolioEnvironment` from UserDefaults and returns its base URL (`baseURLString`) and API key (`apiKey()`, from the Keychain, which throws if the Keychain can't be read). It reads fresh on every access. `URLProcessor.fromSettings()` and the URL helper functions (`mediaURL(for:)`, `resolveMarkdownImageURLs(_:)`) use it by default, so switching the picker in Settings takes effect immediately for all subsequent requests; no restart required. The helpers take a `baseURL:` argument so tests don't depend on settings.
+
+Switching environments mustn't change what's already open, though:
+
+- **Lists** remember the environment they loaded from (`loadedEnvironment`). `PostsView` / `ProjectsView` call `environmentDidChange()` when the picker changes, which clears the items and selection and loads the new environment's. Deleting refuses if the environment changed since the list loaded.
+- **Editors** record the environment they were opened from (`environment`, shown as the navigation subtitle and in delete confirmations) and call `checkEnvironment()` before every upload, save, delete, and file cleanup. A change throws `APIError.environmentChanged(openedFrom:)` instead of sending anything to the other server. The check runs on the main actor just before each repository call, which builds its `URLProcessor` synchronously, so the request goes to the server that was checked.
+- **App pages**: `AppDetailView` reloads when the environment changes, and its editors pin their environment the same way.
+
+### Base URLs
+
+Settings saves a base URL and API key together, only when **Save** is pressed, so a half-typed address never becomes the active server. `ServerURL.normalize(_:)` checks it first: an `https` URL with a host (or `http` for `localhost` / `127.0.0.1`, matching `Info.plist`), no query or fragment, and not ending in `/api` (Folio adds that). It also trims trailing slashes. `URLProcessor.fromSettings()` applies the same check, so a bad stored value throws `.invalidURL`. Saving an empty API key removes the saved one.
 
 ### `Info.plist`
 
@@ -161,7 +183,7 @@ Contains only `NSAppTransportSecurity` (allowing HTTP to `localhost` for local d
 
 ### Keychain
 
-`KeychainService` (behind the `KeychainStoring` protocol) is a thin wrapper around `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete`. It stores one string per key under `kSecClassGenericPassword`. The API key "Save" button in Settings is explicit — the key is not written to Keychain on every keystroke — and a failed save shows the Keychain's error (`KeychainError` is a `LocalizedError`) rather than a "saved" confirmation. `SettingsViewModel` holds the fields and does the saving.
+`KeychainService` (behind the `KeychainStoring` protocol) is a thin wrapper around `SecItemUpdate` / `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete`. It stores one string per key under `kSecClassGenericPassword`, identified by account alone (as it always has been; adding a service now would stop finding existing keys). Saving updates the existing item and only adds one when there isn't one, so a failure can't leave the old key deleted. Reads and deletes throw `KeychainError` for anything but success or "not found", so a locked Keychain is reported rather than looking like a missing key. The key is saved only by Settings' explicit **Save**, and a failed save shows the Keychain's error rather than a "saved" confirmation. `SettingsViewModel` holds the fields and does the saving.
 
 ---
 
@@ -198,7 +220,7 @@ AppRecord        // id only — the local list of known app slugs stored in User
 
 ### Dates
 
-All `Date` fields are encoded/decoded as ISO 8601 strings. The `URLProcessor`'s shared encoder/decoder both use `.iso8601` strategy. `AppPrivacyPolicy.lastUpdated` is the exception — it stores a plain `yyyy-MM-dd` string and is converted to/from `Date` inside `AppPrivacyPolicyEditorViewModel` using a static `DateFormatter` with a POSIX locale.
+All `Date` fields are encoded/decoded as ISO 8601 strings. The `URLProcessor`'s shared encoder/decoder both use `.iso8601` strategy. `AppPrivacyPolicy.lastUpdated` is the exception — it stores a plain `yyyy-MM-dd` string (see §12).
 
 ### Update payloads
 
@@ -208,6 +230,8 @@ The server merges a `PUT` body into the stored item (`{ ...existing, ...req.body
 try container.encode(heroImage, forKey: .heroImage)       // nil → "heroImage": null (clears it)
 try container.encodeIfPresent(createdAt, forKey: .createdAt)  // nil → left out (keeps it)
 ```
+
+`AppPrivacyPolicyUpdate` and `AppSupportUpdate` do the same for app pages, so clearing a contact URL or button title sends `null`. (They used to be saved with the models' synthesized encoding, which leaves `nil` out, so the server kept the old values.)
 
 A project's `heroImage` is a required string, so clearing it sends `""`. Only `createdAt` is left out when `nil`; editing it via the inspector DatePicker sends the new date. The server computes posts' `readingTime` itself on create and update; the client's estimate is only for display.
 
@@ -231,18 +255,23 @@ Available methods: `get`, `post`, `put`, `delete`, `upload`. All throw `APIError
 
 ```swift
 enum APIError: Error {
-    case unauthorized       // 401 — "check your API key in Settings"
-    case notFound           // 404
-    case conflict           // 409 — duplicate ID
-    case httpError(Int)     // other 4xx/5xx
-    case encodingFailed     // JSON encode failure
-    case decodingFailed     // JSON decode failure
-    case networkFailed      // URLSession error
-    case invalidURL         // empty or malformed base URL
+    case unauthorized                       // 401 — "check your API key in Settings"
+    case notFound                           // 404
+    case conflict                           // 409 — duplicate ID
+    case httpError(statusCode:, message:)   // other 4xx/5xx, with the server's `error` text
+    case encodingFailed                     // JSON encode failure
+    case decodingFailed                     // JSON decode failure
+    case networkFailed                      // URLSession error
+    case invalidURL                         // empty or unusable base URL
+    case keychain                           // the API key couldn't be read
+    case environmentChanged(openedFrom:)    // an editor's environment isn't the active one any more
+    case cleanupFailed(count:, underlying:) // saved, but unused files couldn't be deleted
 }
 ```
 
-`error.isCancellation` returns true when a task was cancelled (i.e. the user navigated away). Cancellation errors are not shown to the user.
+The server answers a rejected request with `{ "error": "…" }` (like "Invalid project: tagline can't be empty"). `URLProcessor.serverMessage(in:)` decodes it, shortened past 500 characters, and `httpError` shows it as the error's description; without one it says "Server error (<status>)".
+
+`error.isCancellation` returns true when a request was cancelled (the `.task` that loaded it went away). Cancellations are never shown, in loads or in saves, uploads, and deletes.
 
 ### Multipart upload
 
@@ -270,10 +299,10 @@ ContentView  (TabView .sidebarAdaptable)
 │   └── AppDetailView
 │       ├── AppPrivacyPolicyEditorView
 │       └── AppSupportEditorView
-└── SettingsView
+└── SettingsView  (iOS only)
 ```
 
-On macOS, `SettingsView` is also presented via `Settings { }` in the standard Preferences window (accessed via ⌘,).
+On macOS, `SettingsView` is only in the Settings window (`Settings { }`, ⌘,). A tab as well would mean two `SettingsViewModel`s, each with its own copy of the fields, which could save stale values over each other.
 
 ### List → detail pattern
 
@@ -284,11 +313,21 @@ On macOS, `SettingsView` is also presented via `Settings { }` in the standard Pr
 
 **Critical:** open the create form only through `startCreating()`, which clears `selectedID` before setting `isCreatingNew`. With both `navigationDestination` modifiers active at once, SwiftUI resolves to the `item:` destination (the already-selected edit view) instead of the create form.
 
-`.onDisappear { vm.clearSelection() }` clears the selection when switching tabs, preventing stale navigation state from re-opening the detail view when returning to the tab. Deleting from the list (swipe or context menu) also deletes the item's draft.
+`.onDisappear { vm.clearSelection() }` clears the selection when switching tabs, preventing stale navigation state from re-opening the detail view when returning to the tab.
+
+Deleting from the list (swipe or context menu) only sets `pendingDeletion`; a confirmation naming the item and environment calls `delete(id:)`. (The dialog's button deletes the item it was presented with, since the dialog clears `pendingDeletion` as it closes.) Deleting also deletes the item's draft.
+
+Loads are ordered by a generation count: `refresh()`, `appendOrReplace(_:)`, and `remove(id:)` each bump it, and a load that finishes after a newer load or local change is ignored, so a slow refresh can't replace a just-saved item with its old version. A cancelled load (like switching tabs before the first load finished) doesn't count as loaded, so `loadIfNeeded()` tries again the next time the list appears.
 
 ### ViewModel lifetime
 
 Editor ViewModels are created in the list view's destination closures, with the list's repositories and draft store, and held in `@State private var vm` inside the destination view. Each navigation push creates a fresh VM. The VM's `load()` is called from `.task { await vm.load() }` in the view's body.
+
+### Editor load state
+
+The post and project editors track `loadState` (`EditorLoadState`): `.loading`, `.loaded`, or `.failed(message:showsDraft:)`. Only a loaded item can be saved (`canSave`), so a failed load can never publish empty fields over the server's version (it used to: typing a title into the empty form after a failed load and publishing erased the post). While loading, the form is disabled under a spinner (`LoadStateOverlay`). If the load fails and there's no draft, the overlay shows the error and **Try Again**. If there is a draft, the editor shows it with a banner (`LoadProblemBanner`): it can be edited (and keeps autosaving), but not saved until **Try Again** loads the server's version, which the draft is then restored over.
+
+`canSave` also requires that nothing is saving and that `validationIssues` is empty. The issues come from `ContentRules` (a copy of the server's rules in `backend/src/lib/schemas.ts` and `paths.ts`: required fields, lengths, list sizes, link schemes, slugs that aren't `index`, `nav`, or over 100 characters) and are listed in the editor by `ValidationIssuesView`. New items show their public path (`/blog/<slug>`, `/projects/<slug>`) under the slug field. Keep `ContentRules` in step with the server.
 
 ```
 List view owns: listVM (items, selectedID, isCreatingNew), repositories, DraftStore
@@ -297,7 +336,7 @@ Detail view owns: formVM (fresh per push)
 
 ### Inspector panel
 
-Both `ProjectFormView` and `PostEditorView` use SwiftUI's `.inspector(isPresented:)` modifier. On macOS this becomes a trailing sidebar panel; on iOS it slides up as a sheet. The inspector contains status controls, date editors, and the delete button. It does not affect the main form — both regions are always live.
+Both `ProjectFormView` and `PostEditorView` use SwiftUI's `.inspector(isPresented:)` modifier. On macOS this becomes a trailing sidebar panel; on iOS it slides up as a sheet. The inspector contains status controls, date editors, and the delete button. It does not affect the main form — both regions are always live. The Dates section is shown for new items too (showing today until a date is picked), so they can be backdated when they're created.
 
 ### `@Observable` ViewModels
 
@@ -339,7 +378,9 @@ enum EditorAction {
 }
 ```
 
-`MarkdownToolbar` sends the formatting actions; `InsertImageButtons` (its accessory in the post and project editors) uploads a picked image and the view model sends `.insertText("![](path)")`.
+`MarkdownToolbar` sends the formatting actions; `InsertImageButtons` (its accessory in the post and project editors) uploads a picked image and the view model sends `.wrap(prefix: "![", suffix: "](path)", placeholder: "Describe the image")`, so the alt text is selected, ready to type over.
+
+On iOS the text view's font is scaled with `UIFontMetrics` for the body style, with `adjustsFontForContentSizeCategory`, so it follows Dynamic Type. Toolbar items are at least 44 points square on iOS (28 on macOS), and the heading labels use a scaled text style.
 
 `updateNSView`/`updateUIView` don't apply the action themselves: applying it changes the text (and, through the delegate, the `text` binding) and clears `pendingAction`, and changing state during a view update makes SwiftUI warn and can loop. `applyAfterUpdate` applies it in a main-actor `Task` right after the update, then clears the binding. The coordinator's `isApplyingAction` flag keeps updates that arrive in between from applying the same action twice.
 
@@ -353,7 +394,7 @@ enum EditorAction {
 
 ### Diff highlighting
 
-When the "Show Changes" toolbar toggle is on, `highlightRanges` is set to the output of `computeChangedLineRanges(from:to:)`. On macOS, `NSLayoutManager.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.25))` is used — temporary attributes are display-only and don't affect the underlying `NSTextStorage`, so they're compatible with `isRichText = false`.
+When **Highlight Changed Lines** (in `DraftMenu`) is on, `highlightRanges` is set to the output of `computeChangedLineRanges(from:to:)`. It marks added and changed lines; deleted lines have nothing to highlight. It's macOS only: the iOS text view ignores `highlightRanges`, so `DraftMenu` doesn't offer it there, nor in app pages (pass no binding). On macOS, `NSLayoutManager.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.25))` is used — temporary attributes are display-only and don't affect the underlying `NSTextStorage`, so they're compatible with `isRichText = false`.
 
 The Coordinator caches `lastHighlightRanges` and skips the layout manager call if the ranges haven't changed, avoiding unnecessary redraws on every keystroke.
 
@@ -361,24 +402,31 @@ The Coordinator caches `lastHighlightRanges` and skips the layout manager call i
 
 ### Image URL resolution for preview
 
-Markdown content stores images as relative paths: `![alt](/media/posts/slug/uuid.webp)`. The `resolveMarkdownImageURLs(_:)` free function (in `URLProcessor.swift`) rewrites these to absolute URLs before passing content to `StructuredText`. Already-absolute URLs pass through unchanged. **Do not store absolute URLs in content** — the base URL changes between dev and prod.
+Markdown content stores images as relative paths: `![alt](/media/posts/slug/uuid.webp)`. The `resolveMarkdownImageURLs(_:)` free function (in `URLProcessor.swift`) rewrites these, and reference definitions like `[hero]: /media/…`, to absolute URLs before passing content to `StructuredText`. It leaves fenced code blocks and inline code alone, since they show markdown rather than render it. Already-absolute URLs pass through unchanged. **Do not store absolute URLs in content** — the base URL changes between dev and prod.
+
+`MarkdownPreview` wraps this for every editor's **Preview** toggle (posts, project descriptions, and both app pages). It's close to the published page, not identical: the site renders with its own Markdown components.
 
 ---
 
 ## 10. Draft System
 
-Drafts persist in-progress edits to disk so they survive app termination. Each editor ViewModel owns a `DraftSession<Draft>`, which saves `PostDraft` / `ProjectDraft` (both `EditorDraft`s) through a `DraftStore` as JSON files in `~/Library/Application Support/Folio/drafts/` (inside the sandbox container on macOS).
+Drafts persist in-progress edits to disk so they survive app termination. Each editor ViewModel (posts, projects, and both app pages) owns a `DraftSession<Draft>`, which saves `PostDraft` / `ProjectDraft` / `AppPrivacyPolicyDraft` / `AppSupportDraft` (all `EditorDraft`s) through a `DraftStore` as JSON files in `~/Library/Application Support/Folio/drafts/` (inside the sandbox container on macOS).
 
 ### Draft keys
 
+Keys start with the environment (`dev.` or `prod.`), so Development and Production drafts of the same item stay apart (local content is a copy of the live site's, so the same IDs exist on both).
+
 | Context | Key |
 |---------|-----|
-| New project | `project-new` |
-| Editing project `slug` | `project-slug` |
-| New post | `post-new` |
-| Editing post `slug` | `post-slug` |
+| New project | `<env>.new-project` |
+| Editing project `slug` | `<env>.project-slug` |
+| New post | `<env>.new-post` |
+| Editing post `slug` | `<env>.post-slug` |
+| Privacy policy / support page for app `slug` | `<env>.app-slug-privacy-policy` / `<env>.app-slug-support` |
 
-`PostEditorViewModel.draftKey(for:)` / `ProjectFormViewModel.draftKey(for:)` build them. When a new item is first saved, its draft moves from `…-new` to the item's key.
+`PostEditorViewModel.draftKey(for:environment:)` / `ProjectFormViewModel.draftKey(for:environment:)` build them. New items use `new-…`, which no ID can collide with (the old `post-new` was also the key of a post with the ID `new`). When a new item is first saved, its draft moves to the item's key. There's one new-item draft per kind and environment, so two windows creating posts at once share it.
+
+**Legacy drafts.** Drafts saved before keys had an environment (`post-slug`, `post-new`) are found through `legacyDraftKey(for:)`, moved to the current environment's key, and restored as stale (`isLegacy`), so the editor asks whether to keep them: they may have been started on the other server.
 
 ### Baseline: only save real changes
 
@@ -388,11 +436,17 @@ The session saves nothing until the editor sets a **baseline**: the fields as lo
 - A failed or cancelled load never sets a baseline, so leaving early can't save empty fields.
 - Undoing your edits by hand deletes the draft.
 
-`hasDraft` reflects whether a draft file with changes exists, so **Show Changes** and **Discard Draft** appear as soon as an edit is autosaved.
+`hasDraft` reflects whether a draft file with changes exists, so **Highlight Changed Lines** and **Discard Draft** appear as soon as an edit is autosaved.
+
+### Failures
+
+`DraftStore`'s `save`, `load`, and `clear` throw `DraftStore.DraftError`. The session sets `hasDraft` only after a save succeeds, reports every failure through `onError` (the editor shows it in its error alert), and sets `isFailing` after a failed save, which shows **Draft Not Saved** in the editor's toolbar. A draft that can't be read (like after a change to a draft type that wasn't optional) isn't treated as missing: `load` moves it to `<key>.unreadable-<timestamp>.json` and reports it, so the next autosave can't overwrite it.
 
 ### Autosave trigger
 
-Every form field that belongs in drafts has a `didSet` that calls `fieldChanged()`, which hands the current draft to `draftSession.scheduleSave(_:)`. The save is debounced 2 seconds and the task holds the session weakly. The editor also saves immediately when it closes (`saveDraftNow()`, from `.onDisappear`), unless the item was just deleted.
+Every form field that belongs in drafts has a `didSet` that calls `fieldChanged()`, which hands the current draft to `draftSession.scheduleSave(_:)`. The save is debounced 2 seconds and the task holds the session weakly. The editor also saves immediately when it closes (`saveDraftNow()`, from `.onDisappear`) and when the app leaves the foreground (`scenePhase`), since iOS can suspend or quit an app without its views disappearing. Nothing is saved for an item that was just deleted.
+
+Drafts include a picked hero image that hasn't been uploaded (`pendingHeroImage`, the image data itself) and the files uploaded while editing (`uploadedFiles`, see §11). `uploadedFiles` is stored as `nil` when empty, so drafts saved before it existed still compare as unchanged.
 
 ### `isPopulating` flag
 
@@ -404,6 +458,10 @@ Every form field that belongs in drafts has a `didSet` that calls `fieldChanged(
 2. `draftSession.setBaseline(currentDraft)`
 3. `draftSession.restore()` → if a draft with changes exists, `populate(fromDraft:)` layers it over the server data; a draft identical to the server's version is deleted
 
+If the fetch fails, `draftSession.restoreOffline(empty:)` loads the draft with an empty baseline, so edits keep being saved over it (see "Editor load state" in §8). **Try Again** saves the draft first, then runs the normal sequence, which restores it over the server's version (with the usual stale check).
+
+App pages have nothing to fetch (the detail view already loaded them), so their `load()` just sets the baseline and restores. They have no `updatedAt` on the server, so their drafts can't be detected as stale.
+
 ### Stale drafts
 
 Each draft records the server's `updatedAt` for the version it started from (`serverUpdatedAt`; the server sets `updatedAt` on every update). If a restored draft's version doesn't match the server's, `isDraftStale` is set and the editor asks (`.staleDraftAlert`): **Keep Draft** keeps editing (and records the current version, so it doesn't ask again), **Discard Draft** shows the server's version. Publishing a stale draft would undo the newer changes on the server.
@@ -414,7 +472,9 @@ Each draft records the server's `updatedAt` for the version it started from (`se
 
 ### Save and discard
 
-A successful save deletes the draft, moves to the item's key, repopulates from the server's response, and sets that as the new baseline, so leaving afterwards saves nothing. **Discard Draft** deletes the draft and repopulates from the baseline (the version the editor loaded); it doesn't refetch.
+A successful save deletes the draft, moves to the item's key, repopulates from the server's response, and sets that as the new baseline, so leaving afterwards saves nothing. Edits made while the save was in flight aren't lost: the editor snapshots the fields it submitted, and if they changed by the time the response arrives, it layers the newer fields over the saved version and saves them as a draft. **Discard Draft** deletes the draft and repopulates from the baseline (the version the editor loaded); it doesn't refetch. It also deletes files uploaded for the draft that the baseline doesn't use.
+
+The app page editors are disabled while saving instead, since saving closes them.
 
 ---
 
@@ -422,15 +482,21 @@ A successful save deletes the draft, moves to the item's key, repopulates from t
 
 ### Upload flow
 
-`MediaRepository.upload(_:context:id:)` posts a `PendingImage` to `POST /api/media/upload` with a multipart body, named `<UUID>.<ext>` (`PendingImage.uploadFileName`). The server accepts images only (JPEG, PNG, WebP, GIF, AVIF, HEIC, up to 25 MB), converts them to WebP named after the uploaded file's base name, and returns `{ "url": "/media/projects/slug/uuid.webp" }`. The returned path is a **relative** server path, stored as-is. The gallery's pickers only offer images.
+`MediaRepository.upload(_:context:id:)` posts a `PendingImage` to `POST /api/media/upload` with a multipart body, named `<UUID>.<ext>` (`PendingImage.uploadFileName`). The server converts JPEG, PNG, WebP, GIF, and AVIF (up to 25 MB) to WebP named after the uploaded file's base name, and returns `{ "url": "/media/projects/slug/uuid.webp" }`. It rejects HEIC with 415, since prebuilt sharp can't decode it. The returned path is a **relative** server path, stored as-is. The gallery's pickers only offer images.
+
+`PendingImage.prepare(_:)` gets every picked image ready first, off the main actor (`@concurrent`): it reads the actual format with ImageIO, keeps formats the server converts, and converts anything else (HEIC, which iPhone photos usually are, TIFF, …) to JPEG at quality 0.9, keeping metadata like orientation. It throws `PendingImage.ImportError` for unreadable images or ones over 25 MB, which the pickers show in an alert instead of silently skipping. The pickers show progress while preparing (`isImporting`) and are disabled meanwhile.
 
 ### New items and IDs
 
-Uploads are stored under the item's ID, so a new post or project can't upload anything until its ID field has a value (`canUploadFiles`; the image buttons and gallery are disabled until then). Once something has been uploaded (`hasUploadedFiles`), the ID field is locked, since changing it would leave the files under the old ID.
+Uploads are stored under the item's ID, so a new post or project can't upload anything until its ID field is a valid slug (`canUploadFiles`; the image buttons and gallery are disabled until then). The ID field locks as soon as an upload starts (`hasUploadedFiles` counts `activeUploads` as well as `uploadedFiles`), since changing it would leave the files under the old ID. The upload captures the ID before it starts, and the lock survives reopening a draft, since `uploadedFiles` is part of it.
 
 ### Deleting unused files
 
-After a successful save, the editor calls `MediaRepository.deleteUnusedFiles(previous:current:text:context:id:)` with the server's previous hero image (and gallery, for projects) and the saved ones. It deletes files that are no longer used, but only files in the item's own folder (`/media/<context>/<id>/`) and not mentioned in its markdown, and ignores files already gone. Nothing is deleted when an image is removed in the editor, only once the save that drops it succeeds, so the live site never points at a deleted file. Inline images removed from markdown aren't tracked and stay on the server.
+Every upload is recorded in `uploadedFiles` (files the server's version doesn't use yet). After a successful save, the editor calls `MediaRepository.deleteUnusedFiles(previous:current:text:context:id:check:)` with the server's previous hero image (and gallery, for projects) plus `uploadedFiles` as candidates, and the saved files plus any edits made during the save as the ones to keep. It deletes candidates that are no longer used, but only files in the item's own folder (`/media/<context>/<id>/`) and not mentioned in its markdown, and ignores files already gone. Nothing is deleted when an image is removed in the editor, only once the save that drops it succeeds, so the live site never points at a deleted file. An image uploaded and removed again before saving is deleted too.
+
+Cleanup runs before `saved` is set, and doesn't fail the save: files that couldn't be deleted stay in `uploadedFiles` (so the item keeps a draft, and the next save tries again), and the editor shows `APIError.cleanupFailed`, which says the item was saved. `check` runs before each deletion (the environment check).
+
+Not covered here: the folder check isn't a check that no other item uses a file (that needs the server), deleting an item leaves its media folder, and uploads in drafts that are abandoned rather than discarded stay on the server. `npm run check` on the backend reports unreferenced media.
 
 ### Relative paths
 
@@ -438,6 +504,7 @@ All stored media URLs are relative (e.g. `/media/projects/slug/uuid.webp`). Two 
 
 - `mediaURL(for path: String) -> URL?` — returns an absolute `URL` for use in `AsyncImage`. Prepends the active environment's base URL.
 - `resolveMarkdownImageURLs(_ content: String) -> String` — rewrites `![alt](/path)` patterns in markdown before passing to `StructuredText`.
+- `smallerMediaPath(for:width:)` — the server saves 640- and 1280-pixel copies beside each upload (`hero.w640.webp`). `MediaThumbnail` loads the 640 one and falls back to the original for images that don't have one yet.
 
 Never store absolute URLs. The base URL differs between dev and prod, so absolute paths would break when switching environments.
 
@@ -447,7 +514,7 @@ Hero images follow the same relative-path rule. The hero image field stores a pa
 
 `HeroImageRow` (shared by both editors) shows the hero image and holds a newly picked one as a `PendingImage` until save. Upload happens at save time, not selection time. This avoids uploading images for forms that are never saved.
 
-`PendingImage` holds the data, MIME type, and extension of a picked image. `PendingImage.load(from:)` loads one from a `PhotosPickerItem`; on macOS, `PendingImage.chooseFiles(allowsMultipleSelection:)` and `init?(contentsOf:)` load files from an open panel or a drop. Gallery images (`ProjectFormViewModel.addMedia(_:)`) and inline images upload immediately.
+`PendingImage` holds the data, MIME type, and extension of a picked image, already prepared for upload. `PendingImage.load(from:)` loads one from a `PhotosPickerItem`; on macOS, `PendingImage.chooseFiles(allowsMultipleSelection:)` asks for files with an open panel and `load(contentsOf:)` loads a file (from the panel or a drop). `HeroImageRow` previews a picked image from a downsampled copy (`thumbnail(maxPixelSize:)`), made once per pick. Gallery images (`ProjectFormViewModel.addMedia(_:)`) and inline images upload immediately.
 
 ### File picker on macOS
 
@@ -455,23 +522,9 @@ SwiftUI's `.fileImporter` silently fails when nested inside `Form > Section` on 
 
 ### Drag-to-reorder in media gallery
 
-`MediaManagerView` renders media rows in a `VStack` (not a `List`, since `List` applies its own layout and doesn't compose well inside a `Form`). Reorder is implemented with `.draggable(item.id)` and `.dropDestination(for: String.self)` on each row:
+`MediaManagerView` renders media rows in a `VStack` (not a `List`, since `List` applies its own layout and doesn't compose well inside a `Form`). Reorder is implemented with `.draggable(item.id)` and `.dropDestination(for: String.self)` on each row, which call `Array.move(id:onto:)` (`Helpers/Array+Move.swift`): the dropped item takes the target's place, after it when moving down the list and before it when moving up. So dropping an item on its neighbor swaps them, and dropping on the last item moves it to the end. (The old `from < to ? to - 1 : to` made dropping on the next item do nothing, and nothing could reach the end.)
 
-```swift
-.dropDestination(for: String.self) { droppedIDs, _ in
-    guard let droppedID = droppedIDs.first, droppedID != item.id,
-          let from = media.firstIndex(where: { $0.id == droppedID }),
-          let to   = media.firstIndex(where: { $0.id == item.id })
-    else { return false }
-    withAnimation {
-        let moved = media.remove(at: from)
-        media.insert(moved, at: from < to ? to - 1 : to)
-    }
-    return true
-}
-```
-
-The index adjustment `from < to ? to - 1 : to` corrects for the array shift that occurs after `remove(at: from)`.
+Each row also has **Move Up** / **Move Down** in its context menu and as accessibility actions (`move(id:by:)`), for keyboard and VoiceOver users, and a Remove button labeled with the file name.
 
 ---
 
@@ -479,15 +532,17 @@ The index adjustment `from < to ? to - 1 : to` corrects for the array shift that
 
 ### Why UserDefaults for the app list
 
-The portfolio API has no "list all apps" endpoint. The list of known app slugs is stored locally in UserDefaults as JSON-encoded `[AppRecord]` under the key `"folio.apps"`. The user manually adds/removes app slugs via an alert dialog. Each `AppRecord` contains only an `id` (the slug).
+The portfolio API has no "list all apps" endpoint. The list of known app slugs is stored locally in UserDefaults as JSON-encoded `[AppRecord]` under the key `"folio.apps"`. The user manually adds app slugs via an alert dialog, and removes them with **Remove from List**, which only forgets the bookmark: the app's pages stay on the site. Each `AppRecord` contains only an `id` (the slug).
 
 ### Page load
 
-`AppDetailViewModel.load()` fetches the privacy policy and support page **sequentially**, not concurrently. Each fetch can independently fail with `.notFound` (page doesn't exist yet) or a network error. The VM tracks four states per page type: `missing`, `failed`, the loaded value, and loading. The view renders the appropriate UI for each state.
+`AppDetailViewModel.load()` fetches the privacy policy and support page **sequentially**, not concurrently. Each fetch can independently fail with `.notFound` (page doesn't exist yet) or another error. The VM tracks four states per page type: `missing`, the error (`privacyPolicyError` / `supportError`, shown with **Try Again**), the loaded value, and loading. The view renders the appropriate UI for each state, and reloads when the environment changes.
+
+The editors (`AppPrivacyPolicyEditorViewModel`, `AppSupportEditorViewModel`) work like the post and project editors: drafts, an environment pin, validation (`ContentRules`), Preview, and update payloads that send cleared contact fields as `null`.
 
 ### `lastUpdated` date handling
 
-`AppPrivacyPolicy.lastUpdated` is a `String` in `yyyy-MM-dd` format, not a `Date`, because the API stores it as a plain date string. `AppPrivacyPolicyEditorViewModel` converts to/from `Date` using a static `DateFormatter` with `Locale(identifier: "en_US_POSIX")` and `TimeZone(secondsFromGMT: 0)` to ensure consistent parsing regardless of the user's locale.
+`AppPrivacyPolicy.lastUpdated` is a `String` in `yyyy-MM-dd` format, not a `Date`, because it's a calendar day, not an instant. `AppPrivacyPolicyEditorViewModel` keeps it as midnight UTC on that day (`Date.calendarDay(in:)`), converting with a static POSIX, UTC `DateFormatter`, and its `DatePicker` shows it in UTC (`.environment(\.timeZone, .gmt)`). Showing a UTC date in the device's time zone used to show it a day early west of UTC, and save a picked date a day late. A new policy starts on today's local date.
 
 ---
 
@@ -548,11 +603,11 @@ The `isPopulating` guard prevents this sync from firing during the initial data 
 
 ### Error display
 
-All errors surface through an `error` property on the ViewModel (`APIError?`, or `KeychainService.KeychainError?` in Settings). Views show it with `.errorAlert($vm.error)` (`Helpers/View+ErrorAlert.swift`), which presents an alert while the error is set and clears it when dismissed. Cancellations (`error.isCancellation`) are never assigned.
+All errors surface through an `error` property on the ViewModel: `APIError?` in the lists, `KeychainService.KeychainError?` in Settings, and `(any LocalizedError)?` in the editors, which also show draft errors (`DraftStore.DraftError`). Views show it with `.errorAlert($vm.error)` (`Helpers/View+ErrorAlert.swift`, with an overload for `any LocalizedError`), which presents an alert while the error is set and clears it when dismissed. Cancellations (`error.isCancellation`) are never assigned. Image import errors are shown by the picker views themselves.
 
 ### Task cancellation
 
-Long-running async calls (fetches, saves) run from `.task` modifiers, which are automatically cancelled when the view disappears. Cancellation errors are detected with `error.isCancellation` and silently discarded. The draft autosave task holds its `DraftSession` weakly, so it does nothing if the editor has gone away; there are no `deinit`s, since a main-actor class's `deinit` can't touch its stored properties in Swift 6.
+Loads run from `.task` modifiers, which are cancelled when the view disappears. Saves, uploads, and deletes run from unstructured `Task {}`s in button actions, so they finish even if the editor closes. Cancellation errors are detected with `error.isCancellation` and silently discarded either way. The draft autosave task holds its `DraftSession` weakly, so it does nothing if the editor has gone away; there are no `deinit`s, since a main-actor class's `deinit` can't touch its stored properties in Swift 6.
 
 ---
 
@@ -594,13 +649,13 @@ On macOS 26, `.dropDestination(for:)` has a `Void`-returning overload. A single-
 
 ### Draft fields and schema evolution
 
-`PostDraft` and `ProjectDraft` are `Codable` structs stored as JSON. New optional fields can be added without breaking existing saved drafts — the decoder will set them to `nil` (as with `ProjectDraft.media` and `serverUpdatedAt`). Non-optional new fields require a default value or a migration strategy.
+The draft types are `Codable` structs stored as JSON. New optional fields can be added without breaking existing saved drafts — the decoder will set them to `nil` (as with `ProjectDraft.media`, `serverUpdatedAt`, `pendingHeroImage`, and `uploadedFiles`). Store "empty" as `nil` too, or an old draft won't compare equal to an unchanged editor. A draft that fails to decode is moved aside as `.unreadable-…` (see §10), not lost, but non-optional new fields still need a default value or a migration strategy.
 
 ---
 
 ## 15. Testing
 
-`FolioTests` is a Swift Testing target hosted in the app (which shows an empty window under tests, so nothing loads from the server). Suites are `@MainActor`, one per type: `PostEditorViewModelTests`, `ProjectFormViewModelTests`, `ContentListViewModelTests`, `SettingsViewModelTests`, `URLProcessorTests`, and `HelperTests` (slugs, update payload encoding, URL helpers, line diff, unused-file cleanup).
+`FolioTests` is a Swift Testing target hosted in the app (which shows an empty window under tests, so nothing loads from the server). Suites are `@MainActor`, one per type: `PostEditorViewModelTests`, `ProjectFormViewModelTests`, `ContentListViewModelTests`, `SettingsViewModelTests`, `AppPrivacyPolicyEditorViewModelTests` and `AppSupportEditorViewModelTests` (in one file), `URLProcessorTests`, and `HelperTests` (slugs and content rules, update payload encoding, URL helpers, markdown image resolution, reordering, calendar days, image preparation, line diff, unused-file cleanup).
 
 ### Fakes
 
@@ -608,13 +663,13 @@ Each protocol has a fake in the app target, in the same file, so previews can us
 
 | Fake | Records / controls |
 |------|--------------------|
-| `TestPostRepository`, `TestProjectRepository` | In-memory items; merge updates like the server; `updates`, `deletedIDs`, `fetchError`, `updateDate` |
-| `TestMediaRepository` | `uploads`, `deletedFiles`, `uploadError` |
-| `TestAppsRepository` | In-memory privacy policies and support pages |
-| `TestKeychain` | `values`, `saveError` |
+| `TestPostRepository`, `TestProjectRepository` | In-memory items; merge updates like the server; `updates`, `deletedIDs`, `fetchError`, `updateDate`. Posts also have `listError`, and `beforeList` / `beforeWrite` hooks to hold a request open |
+| `TestMediaRepository` | `uploads`, `deletedFiles`, `uploadError`, `deleteError`, `beforeUpload` |
+| `TestAppsRepository` | In-memory privacy policies and support pages; merges updates like the server (`null` clears); `privacyPolicyUpdates`, `supportUpdates`, `fetchError` |
+| `TestKeychain` | `values`, `saveError`, `readError` |
 | `DraftStore.temporary()` | An empty draft folder in the temporary directory |
 
-`TestHelpers.swift` (test target) adds `makeUserDefaults()` (a fresh suite), `sampleImage`, and `StubURLProtocol` for testing `URLProcessor` against canned responses. Sample data: `PostDetail.sample`, `ProjectDetail.sample`, `AppPrivacyPolicy.sample`, `AppSupport.sample`, `Date.sampleDate`.
+`TestHelpers.swift` (test target) adds `makeUserDefaults()` (a fresh suite) and `makeUserDefaults(environment:)`, `sampleImage`, `StubURLProtocol` for testing `URLProcessor` against canned responses, and `Gate`, which a fake's `before…` hook awaits so a test can act while a request is in flight (`await gate.untilArrived()`, act, `gate.open()`). Editor and list view models take `userDefaults:` for their environment; pass a test suite so tests can switch environments. Sample data: `PostDetail.sample`, `ProjectDetail.sample`, `AppPrivacyPolicy.sample`, `AppSupport.sample`, `Date.sampleDate`.
 
 ### Regression tests
 

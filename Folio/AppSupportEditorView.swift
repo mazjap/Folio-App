@@ -1,117 +1,85 @@
 import SwiftUI
 
-@Observable
-class AppSupportEditorViewModel {
-    let appId: String
-    var appName: String
-    var version: String
-    var subtitle: String
-    var content: String
-    var contactUrl: String
-    var contactText: String
-    var pendingAction: EditorAction?
-    
-    var isSaving = false
-    var error: APIError?
-    var saved: AppSupport?
-    var deleted = false
-    
-    let isEditing: Bool
-    @ObservationIgnored private let repo: any AppsRepositoryProtocol
-    
-    init(appId: String, existing: AppSupport?, repo: any AppsRepositoryProtocol = AppsRepository()) {
-        self.appId = appId
-        self.repo = repo
-        self.isEditing = existing != nil
-        self.appName = existing?.appName ?? ""
-        self.version = existing?.version ?? ""
-        self.subtitle = existing?.subtitle ?? ""
-        self.content = existing?.content ?? ""
-        self.contactUrl = existing?.contactUrl ?? ""
-        self.contactText = existing?.contactText ?? ""
-    }
-    
-    func save() async {
-        isSaving = true
-        defer { isSaving = false }
-        let support = AppSupport(
-            id: appId,
-            appName: appName,
-            version: version,
-            subtitle: subtitle,
-            content: content,
-            contactUrl: contactUrl.isEmpty ? nil : contactUrl,
-            contactText: contactText.isEmpty ? nil : contactText
-        )
-        do {
-            saved = try await isEditing ? repo.updateSupport(support) : repo.createSupport(support)
-        } catch {
-            self.error = error
-        }
-    }
-    
-    func delete() async {
-        isSaving = true
-        defer { isSaving = false }
-        do {
-            try await repo.deleteSupport(appId: appId)
-            deleted = true
-        } catch {
-            self.error = error
-        }
-    }
-}
-
 struct AppSupportEditorView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var vm: AppSupportEditorViewModel
     private let onSave: (AppSupport) -> Void
     private let onDelete: () -> Void
     
     @State private var showDeleteConfirm = false
+    @State private var showDiscardDraftConfirm = false
+    @State private var showPreview = false
     
-    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository(), existing: AppSupport?, onSave: @escaping (AppSupport) -> Void, onDelete: @escaping () -> Void) {
-        self._vm = State(initialValue: AppSupportEditorViewModel(appId: appId, existing: existing, repo: repo))
+    init(appId: String, repo: any AppsRepositoryProtocol = AppsRepository(), drafts: DraftStore = .live, existing: AppSupport?, onSave: @escaping (AppSupport) -> Void, onDelete: @escaping () -> Void) {
+        self._vm = State(initialValue: AppSupportEditorViewModel(appId: appId, existing: existing, repo: repo, drafts: drafts))
         self.onSave = onSave
         self.onDelete = onDelete
     }
     
     var body: some View {
         Form {
+            if !vm.validationIssues.isEmpty {
+                Section {
+                    ValidationIssuesView(issues: vm.validationIssues)
+                }
+            }
+            
             Section("App Info") {
-                TextField("App Name", text: $vm.appName)
-                TextField("Version", text: $vm.version, prompt: Text("2.1.0"))
-                TextField("Subtitle", text: $vm.subtitle, axis: .vertical)
-                    .lineLimit(2...4)
+                LabeledTextField("App Name", text: $vm.appName)
+                LabeledTextField("Version", text: $vm.version, prompt: "2.1.0")
+                LabeledTextField("Subtitle", text: $vm.subtitle, axis: .vertical)
+                    .lineLimit(1...4)
             }
             
             Section("Content") {
-                MarkdownToolbar(pendingAction: $vm.pendingAction)
-                MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
-                    .frame(minHeight: 200)
+                if showPreview {
+                    MarkdownPreview(markdown: vm.content)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    MarkdownToolbar(pendingAction: $vm.pendingAction)
+                    MarkdownEditorView(text: $vm.content, pendingAction: $vm.pendingAction)
+                        .frame(minHeight: 200)
+                }
             }
             
-            Section("Contact (optional)") {
-                TextField("Contact URL", text: $vm.contactUrl, prompt: Text("https://…"))
+            Section {
+                LabeledTextField("Contact URL", text: $vm.contactUrl, prompt: "https://… or mailto:…")
                     .textContentType(.URL)
                     #if !os(macOS)
                     .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
                     #endif
-                TextField("Contact label", text: $vm.contactText, prompt: Text("Visit Website"))
+                LabeledTextField("Contact Button Title", text: $vm.contactText, prompt: "Visit Website")
+            } header: {
+                Text("Contact")
+            } footer: {
+                Text("Optional. Shown as a button at the end of the page.")
             }
             
             if vm.isEditing {
                 Section {
-                    Button("Delete Support Page", role: .destructive) {
+                    Button("Delete Support Page…", role: .destructive) {
                         showDeleteConfirm = true
                     }
                     .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(vm.isSaving)
                 }
             }
         }
         .formStyle(.grouped)
+        // NOTE: - Saving closes the editor, so it's not edited while a save is in flight.
+        .disabled(vm.isSaving)
         .navigationTitle(vm.isEditing ? "Support" : "New Support Page")
+        .navigationSubtitle(vm.environment.longTitle)
+        .toolbarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
+        .onAppear { vm.load() }
+        .onDisappear { vm.saveDraftNow() }
+        .onChange(of: scenePhase) {
+            if scenePhase != .active { vm.saveDraftNow() }
+        }
         .onChange(of: vm.saved) { _, support in
             if let support {
                 onSave(support)
@@ -126,30 +94,48 @@ struct AppSupportEditorView: View {
         }
         .errorAlert($vm.error)
         .confirmationDialog("Delete support page?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) { Task { await vm.delete() } }
+            Button("Delete Support Page", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This cannot be undone.")
+            Text("This deletes it from \(vm.environment.longTitle), and links to it from the App Store stop working. It can't be undone.")
+        }
+        .confirmationDialog("Discard draft?", isPresented: $showDiscardDraftConfirm, titleVisibility: .visible) {
+            Button("Discard", role: .destructive) { vm.discardDraft() }
+            Button("Keep editing", role: .cancel) {}
+        } message: {
+            Text("Reverts to the saved version.")
         }
     }
     
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        if vm.draftSession.isFailing {
+            ToolbarItem(placement: .primaryAction) {
+                DraftNotSavedLabel()
+            }
+        }
+        if vm.hasDraft {
+            ToolbarItem(placement: .primaryAction) {
+                DraftMenu {
+                    showDiscardDraftConfirm = true
+                }
+            }
+        }
         ToolbarItem(placement: .primaryAction) {
-            Button(vm.isEditing ? "Save" : "Create", systemImage: "square.and.arrow.up") {
+            Toggle("Preview", systemImage: "eye", isOn: $showPreview)
+                .help("Preview the rendered page")
+        }
+        ToolbarSpacer(.fixed, placement: .primaryAction)
+        ToolbarItem(placement: .primaryAction) {
+            SaveToolbarButton(vm.isEditing ? "Save" : "Create", isSaving: vm.isSaving, isDisabled: !vm.canSave) {
                 Task { await vm.save() }
             }
-            .disabled(vm.appName.isEmpty || vm.version.isEmpty || vm.isSaving)
-            .keyboardShortcut("s", modifiers: .command)
-        }
-        if vm.isSaving {
-            ToolbarItem(placement: .status) { ProgressView() }
         }
     }
 }
 
 #Preview {
     NavigationStack {
-        AppSupportEditorView(appId: AppSupport.sample.id, repo: TestAppsRepository(), existing: .sample, onSave: { _ in }, onDelete: {})
+        AppSupportEditorView(appId: AppSupport.sample.id, repo: TestAppsRepository(), drafts: .temporary(), existing: .sample, onSave: { _ in }, onDelete: {})
     }
 }

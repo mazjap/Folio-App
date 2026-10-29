@@ -6,8 +6,10 @@ class AppDetailViewModel {
     var support: AppSupport?
     var privacyPolicyMissing = false
     var supportMissing = false
-    var privacyPolicyFailed = false
-    var supportFailed = false
+    /// Why the privacy policy couldn't be loaded, other than not existing.
+    var privacyPolicyError: APIError?
+    /// Why the support page couldn't be loaded, other than not existing.
+    var supportError: APIError?
     var isLoading = false
     
     let appId: String
@@ -22,8 +24,8 @@ class AppDetailViewModel {
         isLoading = true
         privacyPolicyMissing = false
         supportMissing = false
-        privacyPolicyFailed = false
-        supportFailed = false
+        privacyPolicyError = nil
+        supportError = nil
         defer { isLoading = false }
         
         do {
@@ -33,7 +35,7 @@ class AppDetailViewModel {
             if case .notFound = error {
                 privacyPolicyMissing = true
             } else if !error.isCancellation {
-                privacyPolicyFailed = true
+                privacyPolicyError = error
             }
         }
         
@@ -44,13 +46,14 @@ class AppDetailViewModel {
             if case .notFound = error {
                 supportMissing = true
             } else if !error.isCancellation {
-                supportFailed = true
+                supportError = error
             }
         }
     }
 }
 
 struct AppDetailView: View {
+    @AppStorage(FolioStorageKey.activeEnvironment) private var environment = FolioEnvironment.dev
     @State private var vm: AppDetailViewModel
     private let appId: String
     private let repo: any AppsRepositoryProtocol
@@ -96,9 +99,8 @@ struct AppDetailView: View {
                         Label("Add Privacy Policy", systemImage: "plus.circle")
                             .foregroundStyle(.secondary)
                     }
-                } else if vm.privacyPolicyFailed {
-                    Label("Failed to load", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
+                } else if let error = vm.privacyPolicyError {
+                    LoadFailedRow(error: error) { Task { await vm.load() } }
                 }
             }
             
@@ -135,14 +137,18 @@ struct AppDetailView: View {
                         Label("Add Support Page", systemImage: "plus.circle")
                             .foregroundStyle(.secondary)
                     }
-                } else if vm.supportFailed {
-                    Label("Failed to load", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
+                } else if let error = vm.supportError {
+                    LoadFailedRow(error: error) { Task { await vm.load() } }
                 }
             }
         }
         .navigationTitle(appId)
+        .navigationSubtitle(environment.longTitle)
         .task { await vm.load() }
+        // NOTE: - The pages shown are the environment's, so another server's pages are never edited from here.
+        .onChange(of: environment) {
+            Task { await vm.load() }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Refresh", systemImage: "arrow.clockwise") {
@@ -150,6 +156,37 @@ struct AppDetailView: View {
                 }
                 .disabled(vm.isLoading)
             }
+        }
+    }
+}
+
+// MARK: - Load failure row
+
+/// Why a page couldn't be loaded, with a way to try again.
+private struct LoadFailedRow: View {
+    private let error: APIError
+    private let onRetry: () -> Void
+    
+    init(error: APIError, onRetry: @escaping () -> Void) {
+        self.error = error
+        self.onRetry = onRetry
+    }
+    
+    var body: some View {
+        HStack {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Couldn't load")
+                    Text(error.localizedDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            }
+            Spacer()
+            Button("Try Again", action: onRetry)
         }
     }
 }

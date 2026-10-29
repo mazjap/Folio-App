@@ -16,31 +16,32 @@ struct MarkdownToolbar<Accessory: View>: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
-                button("B", title: "Bold", action: .wrap(prefix: "**", suffix: "**", placeholder: "text"))
-                button("I", title: "Italic", action: .wrap(prefix: "_", suffix: "_", placeholder: "text"))
-                button("` `", title: "Code", action: .wrap(prefix: "`", suffix: "`", placeholder: "code"))
-                Divider().frame(height: 20)
-                button("H1", title: "Heading 1", action: .prependLine("# "))
-                button("H2", title: "Heading 2", action: .prependLine("## "))
-                button("H3", title: "Heading 3", action: .prependLine("### "))
-                Divider().frame(height: 20)
-                button("—", title: "Horizontal Rule", action: .insertText("\n\n---\n\n"))
-                button("[ ]", title: "Link", action: .wrap(prefix: "[", suffix: "](url)", placeholder: "text"))
+                button(MarkdownToolbarLabel(systemImage: "bold"), title: "Bold", action: .wrap(prefix: "**", suffix: "**", placeholder: "text"))
+                button(MarkdownToolbarLabel(systemImage: "italic"), title: "Italic", action: .wrap(prefix: "_", suffix: "_", placeholder: "text"))
+                button(MarkdownToolbarLabel(systemImage: "chevron.left.forwardslash.chevron.right"), title: "Code", action: .wrap(prefix: "`", suffix: "`", placeholder: "code"))
+                MarkdownToolbarDivider()
+                button(MarkdownToolbarLabel("H1"), title: "Heading 1", action: .prependLine("# "))
+                button(MarkdownToolbarLabel("H2"), title: "Heading 2", action: .prependLine("## "))
+                button(MarkdownToolbarLabel("H3"), title: "Heading 3", action: .prependLine("### "))
+                MarkdownToolbarDivider()
+                button(MarkdownToolbarLabel(systemImage: "link"), title: "Link", action: .wrap(prefix: "[", suffix: "](url)", placeholder: "text"))
+                button(MarkdownToolbarLabel(systemImage: "minus"), title: "Horizontal Rule", action: .insertText("\n\n---\n\n"))
                 accessory
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .padding(.vertical, 4)
+            .tint(.primary)
         }
-        .background(.bar)
+        .scrollClipDisabled()
     }
     
-    private func button(_ label: String, title: String, action: EditorAction) -> some View {
+    private func button(_ label: MarkdownToolbarLabel, title: String, action: EditorAction) -> some View {
         Button {
             pendingAction = action
         } label: {
-            MarkdownToolbarLabel(label)
+            label
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.borderless)
         .help(title)
         .accessibilityLabel(title)
     }
@@ -54,19 +55,48 @@ extension MarkdownToolbar where Accessory == EmptyView {
 
 // MARK: - Label
 
-/// The look of a markdown toolbar item, for accessories that match the formatting buttons.
+/// The look of a markdown toolbar item: a symbol or short text in a fixed-size square, for accessories that match the formatting buttons.
 struct MarkdownToolbarLabel: View {
-    private let text: String
+    private let text: String?
+    private let systemImage: String?
+    
+    /// The smallest a toolbar item is: compact for a pointer on macOS, and a comfortable touch target on iOS.
+    #if os(macOS)
+    private nonisolated static let minimumSize: CGFloat = 28
+    #else
+    private nonisolated static let minimumSize: CGFloat = 44
+    #endif
     
     nonisolated init(_ text: String) {
         self.text = text
+        self.systemImage = nil
+    }
+    
+    nonisolated init(systemImage: String) {
+        self.text = nil
+        self.systemImage = systemImage
     }
     
     var body: some View {
-        Text(text)
-            .font(.system(size: 12, weight: .medium, design: .monospaced))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+        Group {
+            if let systemImage {
+                Image(systemName: systemImage)
+            } else if let text {
+                Text(text)
+                    .font(.system(.callout, design: .rounded, weight: .semibold))
+            }
+        }
+        .frame(minWidth: Self.minimumSize, minHeight: Self.minimumSize)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Separates groups of markdown toolbar items.
+struct MarkdownToolbarDivider: View {
+    var body: some View {
+        Divider()
+            .frame(height: 18)
+            .padding(.horizontal, 4)
     }
 }
 
@@ -78,6 +108,8 @@ struct InsertImageButtons: View {
     private let onPick: (PendingImage) async -> Void
     
     @State private var pickerItem: PhotosPickerItem?
+    @State private var isImporting = false
+    @State private var importError: PendingImage.ImportError?
     
     init(isEnabled: Bool, onPick: @escaping (PendingImage) async -> Void) {
         self.isEnabled = isEnabled
@@ -85,40 +117,55 @@ struct InsertImageButtons: View {
     }
     
     var body: some View {
-        Divider().frame(height: 20)
+        MarkdownToolbarDivider()
         
         PhotosPicker(selection: $pickerItem, matching: .images) {
-            MarkdownToolbarLabel("![ ]")
+            MarkdownToolbarLabel(systemImage: "photo")
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.borderless)
         .help(isEnabled ? "Insert Image from Photos" : "Enter an ID before adding images")
         .accessibilityLabel("Insert Image from Photos")
-        .disabled(!isEnabled)
+        .disabled(!isEnabled || isImporting)
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
             
-            Task {
-                if let image = await PendingImage.load(from: item) {
-                    await onPick(image)
-                }
-                pickerItem = nil
-            }
+            pickerItem = nil
+            importImage { () throws(PendingImage.ImportError) in try await PendingImage.load(from: item) }
         }
+        .errorAlert($importError)
         
         #if os(macOS)
-        Button("Insert Image from Files", systemImage: "folder") {
-            guard let image = PendingImage.chooseFiles().first else { return }
+        Button {
+            guard let url = PendingImage.chooseFiles().first else { return }
             
-            Task { await onPick(image) }
+            importImage { () throws(PendingImage.ImportError) in try await PendingImage.load(contentsOf: url) }
+        } label: {
+            MarkdownToolbarLabel(systemImage: "folder")
         }
-        .labelStyle(.iconOnly)
-        .font(.system(size: 12))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .buttonStyle(.plain)
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Insert Image from Files")
         .help(isEnabled ? "Insert Image from Files" : "Enter an ID before adding images")
-        .disabled(!isEnabled)
+        .disabled(!isEnabled || isImporting)
         #endif
+        
+        if isImporting {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Adding image")
+        }
+    }
+    
+    /// Prepares the picked image (converting formats the server can't), then hands it to `onPick` to upload. Shows why if it can't be used.
+    private func importImage(_ load: @escaping () async throws(PendingImage.ImportError) -> PendingImage) {
+        isImporting = true
+        Task {
+            do throws(PendingImage.ImportError) {
+                await onPick(try await load())
+            } catch {
+                importError = error
+            }
+            isImporting = false
+        }
     }
 }
 

@@ -8,40 +8,41 @@ struct ProjectListRow: View {
     }
     
     var body: some View {
-        HStack(spacing: 12) {
-            if let url = mediaURL(for: project.heroImage) {
-                AsyncImage(url: url) { image in
-                    image.resizable().aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.15))
-                }
-                .frame(width: 44, height: 44)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
+        HStack(alignment: .top, spacing: 12) {
+            MediaThumbnail(path: project.heroImage, placeholderSystemImage: "folder")
+            
             VStack(alignment: .leading, spacing: 3) {
-                Text(project.title)
-                    .font(.headline)
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(project.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    
+                    if project.featured {
+                        Image(systemName: "star.fill")
+                            .font(.caption)
+                            .foregroundStyle(.yellow)
+                            .accessibilityLabel("Featured")
+                    }
+                }
+                
                 Text(project.tagline)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if let category = project.category {
-                    Text(category)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                
+                HStack(spacing: 6) {
+                    ProjectStatusBadge(status: project.status)
+                    
+                    if let category = project.category {
+                        Text(category)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 4) {
-                ProjectStatusBadge(status: project.status)
-                if project.featured {
-                    Image(systemName: "star.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.yellow)
-                }
+                .padding(.top, 2)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
     }
 }
 
@@ -54,10 +55,9 @@ struct ProjectStatusBadge: View {
     
     var body: some View {
         Text(label)
-            .font(.caption2)
-            .fontWeight(.medium)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
             .background(color.opacity(0.15), in: Capsule())
             .foregroundStyle(color)
     }
