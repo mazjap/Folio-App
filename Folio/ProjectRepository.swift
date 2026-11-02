@@ -42,11 +42,12 @@ struct ProjectUpdate: Encodable, Equatable {
 
 protocol ProjectRepositoryProtocol {
     func fetchProjects() async throws(APIError) -> [ProjectPreview]
-    func fetchProjectNavs() async throws(APIError) -> [ProjectNav]
     func fetchProject(withId id: String) async throws(APIError) -> ProjectDetail
     func createProject(_ project: ProjectDetail) async throws(APIError) -> ProjectDetail
-    func updateProject(id: String, fields: ProjectUpdate) async throws(APIError) -> ProjectDetail
-    func deleteProject(id: String) async throws(APIError)
+    /// - Parameter expectedVersion: The `version` of the project the edit started from; the server refuses the save (`APIError.versionConflict`) if it changed since.
+    func updateProject(id: String, fields: ProjectUpdate, expectedVersion: Date?) async throws(APIError) -> ProjectDetail
+    /// - Parameter expectedVersion: The `version` of the project being deleted; the server refuses if it changed since.
+    func deleteProject(id: String, expectedVersion: Date?) async throws(APIError)
 }
 
 // MARK: - Implementation
@@ -56,12 +57,6 @@ struct ProjectRepository: ProjectRepositoryProtocol {
         let p = try URLProcessor.fromSettings()
         let data = try await p.get(p.apiURL("projects"))
         return try p.decode([ProjectPreview].self, from: data)
-    }
-    
-    func fetchProjectNavs() async throws(APIError) -> [ProjectNav] {
-        let p = try URLProcessor.fromSettings()
-        let data = try await p.get(p.apiURL("projects", "nav"))
-        return try p.decode([ProjectNav].self, from: data)
     }
     
     func fetchProject(withId id: String) async throws(APIError) -> ProjectDetail {
@@ -76,21 +71,21 @@ struct ProjectRepository: ProjectRepositoryProtocol {
         return try p.decode(ProjectDetail.self, from: data)
     }
     
-    func updateProject(id: String, fields: ProjectUpdate) async throws(APIError) -> ProjectDetail {
+    func updateProject(id: String, fields: ProjectUpdate, expectedVersion: Date?) async throws(APIError) -> ProjectDetail {
         let p = try URLProcessor.fromSettings()
-        let data = try await p.put(p.apiURL("projects", id), body: try p.encode(fields))
+        let data = try await p.put(p.apiURL("projects", id), body: try p.encode(fields), expectedVersion: expectedVersion)
         return try p.decode(ProjectDetail.self, from: data)
     }
     
-    func deleteProject(id: String) async throws(APIError) {
+    func deleteProject(id: String, expectedVersion: Date?) async throws(APIError) {
         let p = try URLProcessor.fromSettings()
-        try await p.delete(p.apiURL("projects", id))
+        try await p.delete(p.apiURL("projects", id), expectedVersion: expectedVersion)
     }
 }
 
 // MARK: - Test fake
 
-/// Keeps projects in memory and merges updates the way the server does, for tests and previews.
+/// Keeps projects in memory and handles writes the way the server does (merging updates, refusing writes based on an old version), for tests and previews.
 final class TestProjectRepository: ProjectRepositoryProtocol {
     var projects: [ProjectDetail]
     /// When set, `fetchProject(withId:)` throws it.
@@ -98,6 +93,8 @@ final class TestProjectRepository: ProjectRepositoryProtocol {
     /// The `updatedAt` the "server" gives an updated project.
     var updateDate = Date.sampleDate.addingTimeInterval(3600)
     private(set) var updates: [(id: String, fields: ProjectUpdate)] = []
+    /// The `expectedVersion` of each update and delete, in order.
+    private(set) var expectedVersions: [Date?] = []
     private(set) var deletedIDs: [String] = []
     
     init(projects: [ProjectDetail] = [.sample]) {
@@ -108,10 +105,6 @@ final class TestProjectRepository: ProjectRepositoryProtocol {
         projects.map(\.preview)
     }
     
-    func fetchProjectNavs() async throws(APIError) -> [ProjectNav] {
-        projects.map(\.nav)
-    }
-    
     func fetchProject(withId id: String) async throws(APIError) -> ProjectDetail {
         if let fetchError { throw fetchError }
         guard let project = projects.first(where: { $0.id == id }) else { throw .notFound }
@@ -120,15 +113,21 @@ final class TestProjectRepository: ProjectRepositoryProtocol {
     }
     
     func createProject(_ project: ProjectDetail) async throws(APIError) -> ProjectDetail {
-        guard !projects.contains(where: { $0.id == project.id }) else { throw .conflict }
+        guard !projects.contains(where: { $0.id == project.id }) else { throw .conflict(message: "Project already exists") }
         
-        projects.append(project)
-        return project
+        var stored = project
+        stored.updatedAt = nil
+        projects.append(stored)
+        return stored
     }
     
-    func updateProject(id: String, fields: ProjectUpdate) async throws(APIError) -> ProjectDetail {
+    func updateProject(id: String, fields: ProjectUpdate, expectedVersion: Date?) async throws(APIError) -> ProjectDetail {
         guard let index = projects.firstIndex(where: { $0.id == id }) else { throw .notFound }
         
+        expectedVersions.append(expectedVersion)
+        if let expectedVersion, !expectedVersion.isSameVersion(as: projects[index].version) {
+            throw .versionConflict(message: "This project was changed on the server after you opened it.")
+        }
         updates.append((id, fields))
         projects[index].title = fields.title
         projects[index].tagline = fields.tagline
@@ -145,9 +144,13 @@ final class TestProjectRepository: ProjectRepositoryProtocol {
         return projects[index]
     }
     
-    func deleteProject(id: String) async throws(APIError) {
-        guard projects.contains(where: { $0.id == id }) else { throw .notFound }
+    func deleteProject(id: String, expectedVersion: Date?) async throws(APIError) {
+        guard let project = projects.first(where: { $0.id == id }) else { throw .notFound }
         
+        expectedVersions.append(expectedVersion)
+        if let expectedVersion, !expectedVersion.isSameVersion(as: project.version) {
+            throw .versionConflict(message: "This project was changed on the server after you opened it.")
+        }
         projects.removeAll { $0.id == id }
         deletedIDs.append(id)
     }

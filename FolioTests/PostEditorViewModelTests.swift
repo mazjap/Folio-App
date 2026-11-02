@@ -466,16 +466,117 @@ struct PostEditorViewModelTests {
     
     /// Regression test: reopening a new post's draft with uploaded images unlocked its ID, though the images were stored under it.
     @Test func reopenedNewPostKeepsItsIDLocked() async {
-        let vm = makeViewModel(mode: .create)
-        await vm.load()
-        vm.id = "my post"
-        await vm.uploadInlineImage(sampleImage)
-        vm.saveDraftNow()
+        // NOTE: - The first editor closes before the post is reopened; while it's open, another new post gets a draft of its own.
+        do {
+            let vm = makeViewModel(mode: .create)
+            await vm.load()
+            vm.id = "my post"
+            await vm.uploadInlineImage(sampleImage)
+            vm.saveDraftNow()
+        }
         
         let reopened = makeViewModel(mode: .create)
         await reopened.load()
         
         #expect(reopened.id == "my post")
         #expect(reopened.hasUploadedFiles)
+    }
+    
+    // MARK: - Conflicts
+    
+    /// Saves on "another device": the post changes on the server while the editor is open.
+    private func changeOnServer(title: String? = nil, excerpt: String? = nil) {
+        if let title { repo.posts[0].title = title }
+        if let excerpt { repo.posts[0].excerpt = excerpt }
+        repo.posts[0].updatedAt = Date.sampleDate.addingTimeInterval(60)
+    }
+    
+    @Test func savesAndDeletesSendTheLoadedVersion() async {
+        let vm = makeViewModel()
+        await vm.load()
+        vm.title = "Edited"
+        await vm.save()
+        await vm.delete()
+        
+        #expect(repo.expectedVersions == [PostDetail.sample.version, repo.updateDate])
+        #expect(vm.deleted)
+    }
+    
+    /// Regression test: a save from another device or window after the editor opened was silently overwritten.
+    @Test func aPostChangedElsewhereIsNotOverwritten() async {
+        let vm = makeViewModel()
+        await vm.load()
+        vm.title = "Mine"
+        changeOnServer(excerpt: "Theirs")
+        await vm.save()
+        
+        #expect(vm.saved == nil)
+        #expect(repo.updates.isEmpty)
+        #expect(repo.posts[0].excerpt == "Theirs")
+        #expect(vm.title == "Mine", "the edits are kept as a draft")
+        #expect(vm.hasDraft)
+        #expect(vm.isDraftStale, "and the editor asks whether to keep them over the newer version")
+        #expect(vm.error == nil)
+        
+        vm.keepStaleDraft()
+        await vm.save()
+        
+        #expect(repo.posts[0].title == "Mine")
+        #expect(repo.expectedVersions.last == Date.sampleDate.addingTimeInterval(60))
+    }
+    
+    @Test func discardingAfterAConflictShowsTheNewerVersion() async {
+        let vm = makeViewModel()
+        await vm.load()
+        vm.title = "Mine"
+        changeOnServer(excerpt: "Theirs")
+        await vm.save()
+        vm.discardDraft()
+        
+        #expect(vm.title == PostDetail.sample.title)
+        #expect(vm.excerpt == "Theirs")
+        #expect(!vm.hasDraft)
+    }
+    
+    @Test func aConflictWithNothingToKeepIsExplained() async {
+        let vm = makeViewModel()
+        await vm.load()
+        changeOnServer(title: "Theirs")
+        await vm.save()
+        
+        #expect((vm.error as? APIError)?.isVersionConflict == true)
+        #expect(vm.title == "Theirs")
+        #expect(!vm.isDraftStale)
+    }
+    
+    /// Regression test: deleting a post from its editor deleted it even if it had changed on the server since it was opened.
+    @Test func deletingAPostChangedElsewhereIsRefused() async {
+        let vm = makeViewModel()
+        await vm.load()
+        changeOnServer(title: "Theirs")
+        await vm.delete()
+        
+        #expect(!vm.deleted)
+        #expect(repo.deletedIDs.isEmpty)
+        #expect((vm.error as? APIError)?.isVersionConflict == true)
+        #expect(vm.title == "Theirs")
+    }
+    
+    /// Regression test: two windows creating posts at once shared one draft, so each overwrote the other's.
+    @Test func newPostsOpenAtOnceKeepSeparateDrafts() async throws {
+        let first = makeViewModel(mode: .create)
+        await first.load()
+        first.title = "First"
+        first.saveDraftNow()
+        
+        let second = makeViewModel(mode: .create)
+        await second.load()
+        #expect(second.title == "", "the open editor's draft isn't restored in another")
+        second.title = "Second"
+        second.saveDraftNow()
+        
+        #expect(first.draftSession.key != second.draftSession.key)
+        #expect(try drafts.load(PostDraft.self, key: first.draftSession.key)?.title == "First")
+        #expect(try drafts.load(PostDraft.self, key: second.draftSession.key)?.title == "Second")
     }
 }

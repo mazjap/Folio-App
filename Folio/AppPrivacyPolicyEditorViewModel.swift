@@ -30,6 +30,8 @@ class AppPrivacyPolicyEditorViewModel {
     @ObservationIgnored private let repo: any AppsRepositoryProtocol
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var isPopulating = false
+    /// The server's `updatedAt` for the version being edited: sent with saves and deletes so the server can refuse them if the page changed since, and recorded in drafts.
+    @ObservationIgnored private var serverUpdatedAt: Date?
     
     static let dateFormatter: DateFormatter = {
         let df = DateFormatter()
@@ -72,12 +74,18 @@ class AppPrivacyPolicyEditorViewModel {
         draftSession.hasDraft
     }
     
+    /// Whether the restored draft was started from an older version of the page than the server's. Cleared once the user decides what to do with it.
+    var isDraftStale: Bool {
+        get { draftSession.isStale }
+        set { draftSession.isStale = newValue }
+    }
+    
     static func draftKey(appId: String, environment: FolioEnvironment) -> String {
         "\(environment.rawValue).app-\(appId)-privacy-policy"
     }
     
     private var currentDraft: AppPrivacyPolicyDraft {
-        AppPrivacyPolicyDraft(appName: appName, lastUpdated: Self.dateFormatter.string(from: lastUpdated), content: content, contactUrl: contactUrl, contactText: contactText, serverUpdatedAt: nil, savedAt: .now)
+        AppPrivacyPolicyDraft(appName: appName, lastUpdated: Self.dateFormatter.string(from: lastUpdated), content: content, contactUrl: contactUrl, contactText: contactText, serverUpdatedAt: serverUpdatedAt, savedAt: .now)
     }
     
     // MARK: - Actions
@@ -99,7 +107,7 @@ class AppPrivacyPolicyEditorViewModel {
         do {
             try checkEnvironment()
             let result = if isEditing {
-                try await repo.updatePrivacyPolicy(appId: appId, fields: buildUpdate())
+                try await repo.updatePrivacyPolicy(appId: appId, fields: buildUpdate(), expectedVersion: serverUpdatedAt)
             } else {
                 try await repo.createPrivacyPolicy(buildPolicy())
             }
@@ -109,7 +117,11 @@ class AppPrivacyPolicyEditorViewModel {
             draftSession.setBaseline(currentDraft)
             saved = result
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -121,11 +133,15 @@ class AppPrivacyPolicyEditorViewModel {
         
         do {
             try checkEnvironment()
-            try await repo.deletePrivacyPolicy(appId: appId)
+            try await repo.deletePrivacyPolicy(appId: appId, expectedVersion: serverUpdatedAt)
             draftSession.discard()
             deleted = true
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -133,6 +149,12 @@ class AppPrivacyPolicyEditorViewModel {
     func discardDraft() {
         draftSession.discard()
         if let baseline = draftSession.baseline { populate(fromDraft: baseline) }
+    }
+    
+    /// Keeps a draft that was started from an older version of the page.
+    func keepStaleDraft() {
+        draftSession.isStale = false
+        draftSession.save(currentDraft)
     }
     
     /// Saves the draft now, when the editor closes or the app goes to the background.
@@ -150,6 +172,20 @@ class AppPrivacyPolicyEditorViewModel {
         draftSession.scheduleSave(currentDraft)
     }
     
+    /// The page changed on the server after the editor opened, so a save or delete was refused. Keeps the edits as a draft and loads the current version as the new baseline, which asks whether to keep the draft over it (`isDraftStale`). If there were no edits to keep, says what happened instead.
+    private func reloadAfterConflict(_ conflict: APIError) async {
+        draftSession.save(currentDraft)
+        do {
+            let current = try await repo.fetchPrivacyPolicy(appId: appId)
+            populate(from: current)
+            draftSession.setBaseline(currentDraft)
+            if let draft = draftSession.restore() { populate(fromDraft: draft) }
+            if !isDraftStale { error = conflict }
+        } catch {
+            if !error.isCancellation { self.error = error }
+        }
+    }
+    
     private func checkEnvironment() throws(APIError) {
         guard ServerSettings(userDefaults: userDefaults).activeEnvironment == environment else {
             throw .environmentChanged(openedFrom: environment)
@@ -160,6 +196,7 @@ class AppPrivacyPolicyEditorViewModel {
         isPopulating = true
         defer { isPopulating = false }
         
+        serverUpdatedAt = policy.updatedAt
         appName = policy.appName
         lastUpdated = Self.dateFormatter.date(from: policy.lastUpdated) ?? Date.now.calendarDay()
         content = policy.content

@@ -57,6 +57,8 @@ class PostEditorViewModel {
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var isPopulating = false
     @ObservationIgnored private var serverUpdatedAt: Date?
+    /// The `version` of the post the editor loaded, sent with saves and deletes so the server refuses them if the post changed since.
+    @ObservationIgnored private var serverVersion: Date?
     @ObservationIgnored private var serverHeroImage = ""
     
     // MARK: - Init
@@ -74,7 +76,7 @@ class PostEditorViewModel {
         self.mediaRepo = mediaRepo
         self.userDefaults = userDefaults
         self.environment = environment
-        self.draftSession = DraftSession(key: Self.draftKey(for: mode, environment: environment), legacyKey: Self.legacyDraftKey(for: mode), store: drafts)
+        self.draftSession = DraftSession(key: Self.draftKey(for: mode, environment: environment), legacyKey: Self.legacyDraftKey(for: mode), store: drafts, claimsNewDraftSlot: mode == .create)
         draftSession.onError = { [weak self] error in self?.error = error }
     }
     
@@ -138,7 +140,7 @@ class PostEditorViewModel {
         draftSession.isLegacy
     }
     
-    /// The draft key, namespaced by environment so Development and Production drafts of the same post stay apart. New posts use `new-post`, which no post ID can collide with.
+    /// The draft key, namespaced by environment so Development and Production drafts of the same post stay apart. New posts use `new-post`, which no post ID can collide with (the editor may add `-2`, `-3`, … when several are open; see `NewDraftSlots`).
     static func draftKey(for mode: Mode, environment: FolioEnvironment) -> String {
         switch mode {
         case .create: "\(environment.rawValue).new-post"
@@ -233,7 +235,7 @@ class PostEditorViewModel {
             case .create:
                 result = try await repo.createPost(buildDetail())
             case let .edit(id):
-                result = try await repo.updatePost(id: id, fields: buildUpdate())
+                result = try await repo.updatePost(id: id, fields: buildUpdate(), expectedVersion: serverVersion)
             }
             
             // Anything typed while the post was saving is kept as a draft over what was saved.
@@ -268,7 +270,11 @@ class PostEditorViewModel {
                 error = APIError.cleanupFailed(count: cleanup.failed.count, underlying: cleanupError.localizedDescription)
             }
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -280,11 +286,15 @@ class PostEditorViewModel {
         
         do {
             try checkEnvironment()
-            try await repo.deletePost(id: id)
+            try await repo.deletePost(id: id, expectedVersion: serverVersion)
             draftSession.discard()
             deleted = true
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -346,6 +356,13 @@ class PostEditorViewModel {
         draftSession.scheduleSave(currentDraft)
     }
     
+    /// The post changed on the server after the editor loaded it, so a save or delete was refused. Keeps the edits as a draft and loads the current version, which restores the draft over it and asks whether to keep it (`isDraftStale`), with Highlight Changed Lines comparing against the new version. If there were no edits to keep, says what happened instead.
+    private func reloadAfterConflict(_ conflict: APIError) async {
+        draftSession.save(currentDraft)
+        await load()
+        if loadState == .loaded, !isDraftStale { error = conflict }
+    }
+    
     /// Throws if the environment changed since the editor opened, before anything is sent to the server.
     private func checkEnvironment() throws(APIError) {
         guard ServerSettings(userDefaults: userDefaults).activeEnvironment == environment else {
@@ -391,6 +408,7 @@ class PostEditorViewModel {
         
         serverContent = detail.content
         serverUpdatedAt = detail.updatedAt
+        serverVersion = detail.version
         serverHeroImage = detail.heroImage ?? ""
         id = detail.id
         title = detail.title

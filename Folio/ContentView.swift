@@ -36,7 +36,7 @@ struct ContentView: View {
                 PostsView(repo: postRepo, mediaRepo: mediaRepo, drafts: drafts)
             }
             Tab("Apps", systemImage: "square.grid.2x2") {
-                AppsView(vm: AppsViewModel(userDefaults: userDefaults), repo: appsRepo)
+                AppsView(repo: appsRepo, userDefaults: userDefaults)
             }
             // NOTE: - macOS has a Settings window (⌘,) instead. Two settings views would each keep their own copy of the fields and could save stale values over each other.
             #if !os(macOS)

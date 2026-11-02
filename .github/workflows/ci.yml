@@ -1,0 +1,37 @@
+# Unit tests on macOS, an iOS build, and the UI tests on an iPhone simulator, for pushes to main and
+# pull requests. Signing is ad hoc (no team or certificates on the runner). Nothing reaches a server:
+# unit tests use fakes, and UI tests launch the app with -ui-testing (sample content).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SIGNING: CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
+
+jobs:
+  test:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode and simulators
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | grep -E 'iOS|iPhone'
+
+      - name: Unit tests (macOS)
+        run: xcodebuild test -project Folio.xcodeproj -scheme Folio -destination 'platform=macOS' -only-testing:FolioTests $SIGNING
+
+      - name: Build (iOS)
+        run: xcodebuild build -project Folio.xcodeproj -scheme Folio -destination 'generic/platform=iOS Simulator' $SIGNING
+
+      - name: UI tests (iPhone simulator)
+        run: xcodebuild test -project Folio.xcodeproj -scheme Folio -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:FolioUITests $SIGNING

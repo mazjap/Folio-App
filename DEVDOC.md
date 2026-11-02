@@ -85,15 +85,17 @@ Folio/
 ├── Models/
 │   ├── HTTPRequestMethod.swift      HTTP method enum
 │   ├── Media.swift                  MediaType, MediaContext, MediaItem
-│   ├── Post.swift                   PostPreview, PostDetail, PostNav
-│   ├── Project.swift                ProjectPreview, ProjectDetail, ProjectNav, ProjectStatus
-│   └── App.swift                    AppPrivacyPolicy, AppSupport, AppRecord
+│   ├── Post.swift                   PostPreview, PostDetail (and their `version`)
+│   ├── Project.swift                ProjectPreview, ProjectDetail (and their `version`), ProjectStatus
+│   └── App.swift                    AppPrivacyPolicy, AppSupport, AppPageType, AppSummary
 │
 ├── Helpers/                         Extensions of other types (Type+Topic.swift)
 │   ├── String+Slug.swift            String.slugified
 │   ├── View+ErrorAlert.swift        .errorAlert($vm.error)
 │   ├── View+StaleDraftAlert.swift   Keep / discard a draft older than the server's version
 │   ├── URLRequest+HTTPMethod.swift  URLRequest.httpMethodType
+│   ├── URLRequest+ExpectedVersion.swift  The X-Expected-Version header for conditional saves and deletes
+│   ├── Date+Version.swift           isSameVersion(as:), the server's to-the-second version check (for the fakes)
 │   ├── Array+Move.swift             Gallery reordering (move onto a target, move up/down)
 │   ├── Date+CalendarDay.swift       Date-only values as midnight UTC
 │   └── Date+Sample.swift            Date.sampleDate for sample data
@@ -104,7 +106,7 @@ Folio/
 ├── KeychainService.swift            KeychainStoring, KeychainService, TestKeychain
 ├── URLProcessor.swift               HTTP client, JSON coder, apiURL, media URL helpers
 ├── DraftStore.swift                 EditorDraft, the four draft types, DraftStore, line diff
-├── DraftSession.swift               One editor's draft: baseline, debounced save, staleness, legacy and offline restore
+├── DraftSession.swift               One editor's draft: baseline, debounced save, staleness, legacy and offline restore; NewDraftSlots
 ├── EditorLoadState.swift            loading / loaded / failed, shared by the post and project editors
 ├── PendingImage.swift               Not-yet-uploaded image: loading from Photos / Files, conversion to a format the server takes
 │
@@ -113,7 +115,7 @@ Folio/
 ├── MediaRepository.swift            Upload / delete, deleteUnusedFiles, TestMediaRepository
 ├── AppsRepository.swift             App pages CRUD, AppPrivacyPolicyUpdate, AppSupportUpdate, TestAppsRepository, samples
 │
-├── ContentListViewModel.swift       Generic list VM; PostsViewModel / ProjectsViewModel typealiases
+├── ContentListViewModel.swift       Generic list VM; PostsViewModel / ProjectsViewModel / AppsViewModel typealiases
 ├── ProjectFormViewModel.swift       Edit/Create VM for a single project
 ├── PostEditorViewModel.swift        Edit/Create VM for a single post
 ├── AppPrivacyPolicyEditorViewModel.swift
@@ -122,7 +124,7 @@ Folio/
 ├── ContentView.swift                Root TabView (.sidebarAdaptable)
 ├── ProjectsView.swift               List + NavigationStack for projects
 ├── ProjectFormView.swift            Form + inspector panel for a project
-├── ProjectPreview.swift             ProjectListRow + ProjectStatusBadge
+├── ProjectListRow.swift             ProjectListRow + ProjectStatusBadge
 ├── PostsView.swift                  List + NavigationStack for posts
 ├── PostEditorView.swift             Editor + inspector + markdown preview for a post
 ├── PostListRow.swift                Single row in the posts list
@@ -136,13 +138,15 @@ Folio/
 ├── DraftMenu.swift                  Toolbar menu for an unpublished draft
 ├── SaveToolbarButton.swift          Prominent Save / Publish button
 ├── ContentListOverlay.swift         Spinner / error / empty state for the lists
-├── AppsView.swift                   Apps list + AppsViewModel (UserDefaults-backed)
+├── AppsView.swift                   Apps list (from GET /api/apps), AppListRow
 ├── AppDetailView.swift              Per-app detail: links to privacy + support editors, load errors with Try Again
 ├── AppPrivacyPolicyEditorView.swift
 ├── AppSupportEditorView.swift
 └── SettingsView.swift               SettingsViewModel + Dev/Prod environment picker, URL/key entry
 
 FolioTests/                          Swift Testing suites, one per type (see §15)
+FolioUITests/                        XCTest UI tests against the app's sample content (`-ui-testing`, see §15)
+.github/workflows/ci.yml             Unit tests, iOS build, UI tests on GitHub Actions
 ```
 
 ---
@@ -196,26 +200,24 @@ Contains only `NSAppTransportSecurity` (allowing HTTP to `localhost` for local d
 ```swift
 ProjectPreview   // Used in the list: id, title, tagline, heroImage, category, status, featured, createdAt, updatedAt
 ProjectDetail    // Full project: everything in Preview + description, media, techStack, links
-ProjectNav       // Minimal: id, title, status (used for related-project pickers elsewhere)
 ProjectStatus    // .active | .inProgress | .archived
 ```
 
-`ProjectDetail` extends `ProjectPreview` via a convenience initialiser and exposes `.preview` and `.nav` computed properties to avoid re-fetching when only a subset is needed after a save.
+`ProjectDetail` extends `ProjectPreview` via a convenience initialiser and exposes `.preview` to avoid re-fetching when only a subset is needed after a save. Both have `version` (`updatedAt ?? createdAt`), which saves and deletes send so the server can refuse them if the item changed (§7). The nav endpoints and their models were removed: nothing in Folio used them.
 
 **Posts**
 
 ```swift
 PostPreview      // id, title, excerpt, heroImage?, tags, createdAt, updatedAt?, readingTime, series?
 PostDetail       // Adds: content
-PostNav          // id, title, tags, createdAt, series?
 ```
 
 **Apps**
 
 ```swift
-AppPrivacyPolicy // id (= app slug), appName, lastUpdated (yyyy-MM-dd string), content (markdown), contactUrl?, contactText?
-AppSupport       // id, appName, version, subtitle, content (markdown), contactUrl?, contactText?
-AppRecord        // id only — the local list of known app slugs stored in UserDefaults
+AppPrivacyPolicy // id (= app slug), appName, lastUpdated (yyyy-MM-dd string), content (markdown), contactUrl?, contactText?, updatedAt?
+AppSupport       // id, appName, version, subtitle, content (markdown), contactUrl?, contactText?, updatedAt?
+AppSummary       // An entry of GET /api/apps: id, appName, pages ([AppPageType]: .privacyPolicy, .support)
 ```
 
 ### Dates
@@ -251,13 +253,25 @@ let decoded = try p.decode(MyType.self, from: data)
 
 Available methods: `get`, `post`, `put`, `delete`, `upload`. All throw `APIError` typed errors. `GET`s are unauthenticated; everything else sends the Bearer token. The `session` defaults to `URLSession.shared`; tests pass one backed by a stub `URLProtocol`.
 
+### Conditional saves and deletes
+
+`put(_:body:expectedVersion:)` and `delete(_:expectedVersion:)` send `X-Expected-Version` with the version the edit started from: `version` (`updatedAt ?? createdAt`) for posts and projects, `updatedAt` for app pages (`nil`, so no header, for pages last saved before the server set it). The server compares it inside its write lock and answers **409** with the current record if the item changed since (`backend/src/lib/versions.ts`). The header is formatted like the JSON dates, in whole seconds; the server compares those to the second, so it doesn't matter that decoding may drop the stored milliseconds.
+
+- **Editors** keep the version they loaded (`serverVersion`, or `serverUpdatedAt` for app pages) and send it with Publish and Delete. On `.versionConflict`, `reloadAfterConflict` saves the edits as a draft and loads the current version, which restores the draft over it: the draft is now older than the server's version, so the editor asks **Keep Draft** (the next Publish is based on the new version, and Highlight Changed Lines compares against it) or **Discard Draft** (shows the new version). If there were no edits to keep, the error alert explains what happened.
+- **Lists** send the listed item's version when deleting. A conflict shows the error and reloads the list, so deleting again deletes what's on the server now.
+- The repositories' `expectedVersion:` parameters are required, so new call sites have to decide.
+
+The server also returns 200 with the stored record when a create is retried after its response was lost, so a retried create no longer looks like a duplicate.
+
 ### `APIError`
 
 ```swift
 enum APIError: Error {
     case unauthorized                       // 401 — "check your API key in Settings"
     case notFound                           // 404
-    case conflict                           // 409 — duplicate ID
+    case conflict(message:)                 // other 409s: a duplicate ID, an upload over an existing file
+    case versionConflict(message:)          // 409 with `current`: changed on the server since it was loaded
+    case inUse(message:)                    // 409 with `usedBy`: a media file other content still uses
     case httpError(statusCode:, message:)   // other 4xx/5xx, with the server's `error` text
     case encodingFailed                     // JSON encode failure
     case decodingFailed                     // JSON decode failure
@@ -270,6 +284,8 @@ enum APIError: Error {
 ```
 
 The server answers a rejected request with `{ "error": "…" }` (like "Invalid project: tagline can't be empty"). `URLProcessor.serverMessage(in:)` decodes it, shortened past 500 characters, and `httpError` shows it as the error's description; without one it says "Server error (<status>)".
+
+A 409's kind comes from its body (`URLProcessor.conflictError(in:)`): the server adds `current` to a version conflict and `usedBy` to an in-use media file. All three keep the server's message. `isVersionConflict` and `isInUse` test for them.
 
 `error.isCancellation` returns true when a request was cancelled (the `.task` that loaded it went away). Cancellations are never shown, in loads or in saves, uploads, and deletes.
 
@@ -424,7 +440,9 @@ Keys start with the environment (`dev.` or `prod.`), so Development and Producti
 | Editing post `slug` | `<env>.post-slug` |
 | Privacy policy / support page for app `slug` | `<env>.app-slug-privacy-policy` / `<env>.app-slug-support` |
 
-`PostEditorViewModel.draftKey(for:environment:)` / `ProjectFormViewModel.draftKey(for:environment:)` build them. New items use `new-…`, which no ID can collide with (the old `post-new` was also the key of a post with the ID `new`). When a new item is first saved, its draft moves to the item's key. There's one new-item draft per kind and environment, so two windows creating posts at once share it.
+`PostEditorViewModel.draftKey(for:environment:)` / `ProjectFormViewModel.draftKey(for:environment:)` build them. New items use `new-…`, which no ID can collide with (the old `post-new` was also the key of a post with the ID `new`). When a new item is first saved, its draft moves to the item's key.
+
+**Several new items at once.** A new-item editor's session claims a slot (`claimsNewDraftSlot`, `NewDraftSlots` in `DraftSession.swift`): `<env>.new-post` while no other editor has it open, else `<env>.new-post-2`, and so on, so two windows creating posts at once keep separate drafts. A new editor restores the first saved draft that isn't open elsewhere (so each one is reached in turn, lowest first), or starts in the first free slot. A slot is open while its session exists and still uses that key; saving the item changes the key, which frees it. Claims are kept per draft folder, so tests with their own temporary stores don't see each other. Only the first slot picks up a legacy `post-new` draft.
 
 **Legacy drafts.** Drafts saved before keys had an environment (`post-slug`, `post-new`) are found through `legacyDraftKey(for:)`, moved to the current environment's key, and restored as stale (`isLegacy`), so the editor asks whether to keep them: they may have been started on the other server.
 
@@ -460,7 +478,7 @@ Drafts include a picked hero image that hasn't been uploaded (`pendingHeroImage`
 
 If the fetch fails, `draftSession.restoreOffline(empty:)` loads the draft with an empty baseline, so edits keep being saved over it (see "Editor load state" in §8). **Try Again** saves the draft first, then runs the normal sequence, which restores it over the server's version (with the usual stale check).
 
-App pages have nothing to fetch (the detail view already loaded them), so their `load()` just sets the baseline and restores. They have no `updatedAt` on the server, so their drafts can't be detected as stale.
+App pages have nothing to fetch (the detail view already loaded them), so their `load()` just sets the baseline and restores. The server sets their `updatedAt` on every save (since October 31, 2026), and their drafts record it like the others, so an older draft is flagged as stale. A draft saved before then has no version, so it's flagged once against a page that has one.
 
 ### Stale drafts
 
@@ -496,7 +514,7 @@ Every upload is recorded in `uploadedFiles` (files the server's version doesn't 
 
 Cleanup runs before `saved` is set, and doesn't fail the save: files that couldn't be deleted stay in `uploadedFiles` (so the item keeps a draft, and the next save tries again), and the editor shows `APIError.cleanupFailed`, which says the item was saved. `check` runs before each deletion (the environment check).
 
-Not covered here: the folder check isn't a check that no other item uses a file (that needs the server), deleting an item leaves its media folder, and uploads in drafts that are abandoned rather than discarded stay on the server. `npm run check` on the backend reports unreferenced media.
+The server refuses (409, `.inUse`) to delete a file any content still uses, so a cleanup in one item can't break another's page. `deleteUnusedFiles` treats that like a file already gone: it isn't this item's to delete, so it's neither reported nor retried. Deleting a post or project also makes the server delete the files in its folder that nothing else uses. Uploads in drafts that are abandoned rather than discarded still stay on the server; `npm run check` on the backend reports unreferenced media.
 
 ### Relative paths
 
@@ -530,9 +548,11 @@ Each row also has **Move Up** / **Move Down** in its context menu and as accessi
 
 ## 12. Apps Feature
 
-### Why UserDefaults for the app list
+### The app list
 
-The portfolio API has no "list all apps" endpoint. The list of known app slugs is stored locally in UserDefaults as JSON-encoded `[AppRecord]` under the key `"folio.apps"`. The user manually adds app slugs via an alert dialog, and removes them with **Remove from List**, which only forgets the bookmark: the app's pages stay on the site. Each `AppRecord` contains only an `id` (the slug).
+`AppsViewModel` is a `ContentListViewModel<AppSummary>` loaded from `GET /api/apps` (`AppsRepository.fetchApps()`), so every device sees the same apps, and each environment its own, with the usual loading, error, refresh, and environment-switch handling. Rows show the app's name, ID, and which pages exist. Apps can't be deleted from the list (its `delete` is `nil`); deleting both of an app's pages removes it.
+
+**Add App** names a new app (`addApp(id:)`) and opens it. It has no pages yet, so it's only in the list until the next reload unless one of its pages is saved. The list reloads when you come back from an app, so created and deleted pages show up. The old per-device list (`folio.apps`, now `FolioStorageKey.legacyApps`) is deleted when the list is first created.
 
 ### Page load
 
@@ -655,7 +675,7 @@ The draft types are `Codable` structs stored as JSON. New optional fields can be
 
 ## 15. Testing
 
-`FolioTests` is a Swift Testing target hosted in the app (which shows an empty window under tests, so nothing loads from the server). Suites are `@MainActor`, one per type: `PostEditorViewModelTests`, `ProjectFormViewModelTests`, `ContentListViewModelTests`, `SettingsViewModelTests`, `AppPrivacyPolicyEditorViewModelTests` and `AppSupportEditorViewModelTests` (in one file), `URLProcessorTests`, and `HelperTests` (slugs and content rules, update payload encoding, URL helpers, markdown image resolution, reordering, calendar days, image preparation, line diff, unused-file cleanup).
+`FolioTests` is a Swift Testing target hosted in the app (which shows an empty window under tests, so nothing loads from the server). Suites are `@MainActor`, one per type: `PostEditorViewModelTests`, `ProjectFormViewModelTests`, `ContentListViewModelTests`, `SettingsViewModelTests`, `AppPrivacyPolicyEditorViewModelTests` and `AppSupportEditorViewModelTests` (in one file), `URLProcessorTests`, `DraftSessionTests` (new-item draft slots), and `HelperTests` (slugs and content rules, update payload encoding, URL helpers, markdown image resolution, reordering, calendar days, image preparation, line diff, unused-file cleanup).
 
 ### Fakes
 
@@ -663,9 +683,9 @@ Each protocol has a fake in the app target, in the same file, so previews can us
 
 | Fake | Records / controls |
 |------|--------------------|
-| `TestPostRepository`, `TestProjectRepository` | In-memory items; merge updates like the server; `updates`, `deletedIDs`, `fetchError`, `updateDate`. Posts also have `listError`, and `beforeList` / `beforeWrite` hooks to hold a request open |
+| `TestPostRepository`, `TestProjectRepository` | In-memory items; handle writes like the server (merge updates, no `updatedAt` on create, posts' `readingTime` computed, writes with an old `expectedVersion` refused with `.versionConflict`); `updates`, `expectedVersions`, `deletedIDs`, `fetchError`, `updateDate`. Posts also have `listError`, and `beforeList` / `beforeWrite` hooks to hold a request open |
 | `TestMediaRepository` | `uploads`, `deletedFiles`, `uploadError`, `deleteError`, `beforeUpload` |
-| `TestAppsRepository` | In-memory privacy policies and support pages; merges updates like the server (`null` clears); `privacyPolicyUpdates`, `supportUpdates`, `fetchError` |
+| `TestAppsRepository` | In-memory privacy policies and support pages; `fetchApps()` lists them; handles writes like the server (`null` clears, `updatedAt` set to `updateDate`, old versions refused); `privacyPolicyUpdates`, `supportUpdates`, `expectedVersions`, `fetchError`, `listError` |
 | `TestKeychain` | `values`, `saveError`, `readError` |
 | `DraftStore.temporary()` | An empty draft folder in the temporary directory |
 
@@ -674,3 +694,17 @@ Each protocol has a fake in the app target, in the same file, so previews can us
 ### Regression tests
 
 Every bug fix gets a test that fails without the fix, marked with a `/// Regression test: …` doc comment.
+
+### UI tests
+
+`FolioUITests` (XCTest) launches the app with `-ui-testing` (`UITestContent` in `FolioApp.swift`): `ContentView` gets the `Test…` repositories with their sample content, a temporary draft folder, `TestKeychain`, and a `FolioUITests` user defaults suite emptied at each launch, so nothing reaches a server and every run starts the same. `FolioUITests` checks that each tab shows its content, that editing and publishing a post updates the list, and that deleting from the list asks first; `FolioUITestsLaunchTests` takes a launch screenshot. Elements are found by their visible text, with tab and back navigation per platform (`tab(_:)`, `goBack()`).
+
+```sh
+xcodebuild test -project Folio.xcodeproj -scheme Folio -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3' -only-testing:FolioUITests
+```
+
+They pass on the iPhone simulator. On macOS, XCTest needs permission to control the computer the first time ("Timed out while enabling automation mode" until it's allowed), so run them once from Xcode and approve the prompt.
+
+### CI
+
+`.github/workflows/ci.yml` runs on pushes to `main` and pull requests, on GitHub's `macos-26` runner: the unit tests on macOS, an iOS simulator build, and the UI tests on an iPhone simulator. It signs ad hoc (`CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=`), since the runner has no team or certificates. The unit tests pass locally with those settings.

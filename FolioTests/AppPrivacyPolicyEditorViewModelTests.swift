@@ -81,6 +81,17 @@ struct AppPrivacyPolicyEditorViewModelTests {
         
         #expect(vm.canSave)
     }
+    
+    /// Pages last saved before the server recorded `updatedAt` have no version, so they save unconditionally, and get one from the save.
+    @Test func pagesWithoutAVersionSaveUnconditionally() async {
+        let vm = makeViewModel()
+        vm.content = "Edited"
+        await vm.save()
+        vm.content = "Edited again"
+        await vm.save()
+        
+        #expect(repo.expectedVersions == [nil, repo.updateDate])
+    }
 }
 
 @MainActor
@@ -117,6 +128,41 @@ struct AppSupportEditorViewModelTests {
         
         #expect(reopened.version == "2.0")
         #expect(reopened.hasDraft)
+    }
+    
+    /// Regression test: app pages had no version, so a save from another device after the editor opened was silently overwritten.
+    @Test func aPageChangedElsewhereIsNotOverwritten() async {
+        let id = AppSupport.sample.id
+        let vm = makeViewModel()
+        vm.version = "2.0"
+        repo.supportPages[id]?.subtitle = "Theirs"
+        repo.supportPages[id]?.updatedAt = Date.sampleDate.addingTimeInterval(60)
+        await vm.save()
+        
+        #expect(repo.supportUpdates.isEmpty)
+        #expect(vm.version == "2.0")
+        #expect(vm.isDraftStale)
+        
+        vm.keepStaleDraft()
+        await vm.save()
+        
+        #expect(repo.supportPages[id]?.version == "2.0")
+        #expect(repo.expectedVersions == [Date.sampleDate, Date.sampleDate.addingTimeInterval(60)])
+    }
+    
+    /// Regression test: app page drafts didn't record the page's version, so a draft older than the server's page was published over it without asking.
+    @Test func olderDraftsAreFlagged() {
+        let vm = makeViewModel()
+        vm.version = "2.0"
+        vm.saveDraftNow()
+        
+        var newer = AppSupport.sample
+        newer.updatedAt = Date.sampleDate.addingTimeInterval(60)
+        let reopened = AppSupportEditorViewModel(appId: newer.id, existing: newer, repo: repo, drafts: drafts, userDefaults: defaults)
+        reopened.load()
+        
+        #expect(reopened.isDraftStale)
+        #expect(reopened.version == "2.0")
     }
 }
 

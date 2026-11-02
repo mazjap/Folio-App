@@ -16,7 +16,7 @@ extension MediaRepositoryProtocol {
     // MARK: - Functions
     
     /// Deletes the files a save stopped using: paths in `previous` (the server's old files, and files uploaded while editing) that aren't in `current` and aren't mentioned in `text` (the item's markdown).
-    /// Only files in the item's own folder (`/media/<context>/<id>/`) are deleted, and files already gone are ignored.
+    /// Only files in the item's own folder (`/media/<context>/<id>/`) are deleted. Files already gone are ignored, and so are files the server won't delete because other content uses them (`APIError.inUse`): they're no longer this item's to clean up.
     /// - Parameter check: Runs before each deletion; throwing stops the cleanup (like when the environment changed).
     /// - Returns: The files that couldn't be deleted, and why the first one failed.
     func deleteUnusedFiles(previous: [String], current: [String], text: String, context: MediaContext, id: String, check: () throws(APIError) -> Void = {}) async -> (failed: [String], error: APIError?) {
@@ -33,7 +33,7 @@ extension MediaRepositoryProtocol {
                 try check()
                 try await deleteFile(context: context, id: id, fileName: String(path.dropFirst(folder.count)))
             } catch {
-                guard !error.isNotFound else { continue }
+                guard !error.isNotFound, !error.isInUse else { continue }
                 
                 failed.append(path)
                 firstError = firstError ?? error

@@ -119,4 +119,55 @@ struct ContentListViewModelTests {
         
         #expect(vm.items == [post])
     }
+    
+    // MARK: - Versions
+    
+    @Test func listDeletesSendTheListedVersion() async {
+        let vm = makeViewModel()
+        await vm.refresh()
+        await vm.delete(id: PostDetail.sample.id)
+        
+        #expect(repo.expectedVersions == [PostDetail.sample.version])
+    }
+    
+    /// Regression test: deleting from the list deleted a post even if it had changed on the server since the list loaded.
+    @Test func deletingAnItemChangedSinceTheListLoadedIsRefused() async {
+        let vm = makeViewModel()
+        await vm.refresh()
+        repo.posts[0].title = "Changed"
+        repo.posts[0].updatedAt = Date.sampleDate.addingTimeInterval(60)
+        await vm.delete(id: PostDetail.sample.id)
+        
+        #expect(repo.deletedIDs.isEmpty)
+        #expect(vm.error?.isVersionConflict == true)
+        #expect(vm.items.first?.title == "Changed", "the list reloaded")
+        
+        await vm.delete(id: PostDetail.sample.id)
+        #expect(repo.deletedIDs == [PostDetail.sample.id])
+    }
+    
+    // MARK: - Apps
+    
+    /// Regression test: each device kept its own list of apps, so an app added on one was missing on the others.
+    @Test func appsComeFromTheServer() async {
+        let defaults = makeUserDefaults(environment: .dev)
+        defaults.set(Data(#"[{"id":"old"}]"#.utf8), forKey: FolioStorageKey.legacyApps)
+        let apps = AppsViewModel(repo: TestAppsRepository(privacyPolicies: [.sample], supportPages: []), userDefaults: defaults)
+        await apps.refresh()
+        
+        #expect(apps.items == [AppSummary(id: AppPrivacyPolicy.sample.id, appName: AppPrivacyPolicy.sample.appName, pages: [.privacyPolicy])])
+        #expect(defaults.data(forKey: FolioStorageKey.legacyApps) == nil, "the old device list is gone")
+    }
+    
+    @Test func addedAppsWaitForTheirFirstPage() async {
+        let apps = AppsViewModel(repo: TestAppsRepository(), userDefaults: defaults)
+        await apps.refresh()
+        
+        #expect(apps.addApp(id: "New App") == "new-app")
+        #expect(apps.items.first == AppSummary(id: "new-app", appName: "new-app", pages: []))
+        #expect(apps.addApp(id: "  ") == nil)
+        
+        await apps.refresh()
+        #expect(!apps.items.contains { $0.id == "new-app" }, "it isn't on the server until a page is saved")
+    }
 }

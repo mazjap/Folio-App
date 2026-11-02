@@ -162,4 +162,39 @@ struct ProjectFormViewModelTests {
         #expect(vm.media.isEmpty)
         #expect(mediaRepo.uploads.isEmpty)
     }
+    
+    // MARK: - Conflicts
+    
+    /// Regression test: a save from another device or window after the editor opened was silently overwritten.
+    @Test func aProjectChangedElsewhereIsNotOverwritten() async {
+        let vm = makeViewModel()
+        await vm.load()
+        vm.tagline = "Mine"
+        repo.projects[0].title = "Theirs"
+        repo.projects[0].updatedAt = Date.sampleDate.addingTimeInterval(60)
+        await vm.save()
+        
+        #expect(repo.updates.isEmpty)
+        #expect(vm.tagline == "Mine")
+        #expect(vm.isDraftStale)
+        
+        vm.keepStaleDraft()
+        await vm.save()
+        
+        #expect(repo.projects[0].tagline == "Mine")
+        #expect(repo.expectedVersions == [ProjectDetail.sample.version, Date.sampleDate.addingTimeInterval(60)])
+    }
+    
+    /// Regression test: two windows creating projects at once shared one draft, so each overwrote the other's.
+    @Test func newProjectsOpenAtOnceKeepSeparateDrafts() async {
+        let first = makeViewModel(mode: .create)
+        await first.load()
+        first.title = "First"
+        first.saveDraftNow()
+        let second = makeViewModel(mode: .create)
+        await second.load()
+        
+        #expect(second.title == "")
+        #expect(first.draftSession.key != second.draftSession.key)
+    }
 }

@@ -34,11 +34,12 @@ struct PostUpdate: Encodable, Equatable {
 
 protocol PostRepositoryProtocol {
     func fetchPosts() async throws(APIError) -> [PostPreview]
-    func fetchPostNavs() async throws(APIError) -> [PostNav]
     func fetchPost(withId id: String) async throws(APIError) -> PostDetail
     func createPost(_ post: PostDetail) async throws(APIError) -> PostDetail
-    func updatePost(id: String, fields: PostUpdate) async throws(APIError) -> PostDetail
-    func deletePost(id: String) async throws(APIError)
+    /// - Parameter expectedVersion: The `version` of the post the edit started from; the server refuses the save (`APIError.versionConflict`) if it changed since.
+    func updatePost(id: String, fields: PostUpdate, expectedVersion: Date?) async throws(APIError) -> PostDetail
+    /// - Parameter expectedVersion: The `version` of the post being deleted; the server refuses if it changed since.
+    func deletePost(id: String, expectedVersion: Date?) async throws(APIError)
 }
 
 // MARK: - Implementation
@@ -48,12 +49,6 @@ struct PostRepository: PostRepositoryProtocol {
         let p = try URLProcessor.fromSettings()
         let data = try await p.get(p.apiURL("posts"))
         return try p.decode([PostPreview].self, from: data)
-    }
-    
-    func fetchPostNavs() async throws(APIError) -> [PostNav] {
-        let p = try URLProcessor.fromSettings()
-        let data = try await p.get(p.apiURL("posts", "nav"))
-        return try p.decode([PostNav].self, from: data)
     }
     
     func fetchPost(withId id: String) async throws(APIError) -> PostDetail {
@@ -68,21 +63,21 @@ struct PostRepository: PostRepositoryProtocol {
         return try p.decode(PostDetail.self, from: data)
     }
     
-    func updatePost(id: String, fields: PostUpdate) async throws(APIError) -> PostDetail {
+    func updatePost(id: String, fields: PostUpdate, expectedVersion: Date?) async throws(APIError) -> PostDetail {
         let p = try URLProcessor.fromSettings()
-        let data = try await p.put(p.apiURL("posts", id), body: try p.encode(fields))
+        let data = try await p.put(p.apiURL("posts", id), body: try p.encode(fields), expectedVersion: expectedVersion)
         return try p.decode(PostDetail.self, from: data)
     }
     
-    func deletePost(id: String) async throws(APIError) {
+    func deletePost(id: String, expectedVersion: Date?) async throws(APIError) {
         let p = try URLProcessor.fromSettings()
-        try await p.delete(p.apiURL("posts", id))
+        try await p.delete(p.apiURL("posts", id), expectedVersion: expectedVersion)
     }
 }
 
 // MARK: - Test fake
 
-/// Keeps posts in memory and merges updates the way the server does, for tests and previews.
+/// Keeps posts in memory and handles writes the way the server does (merging updates, computing `readingTime`, refusing writes based on an old version), for tests and previews.
 final class TestPostRepository: PostRepositoryProtocol {
     var posts: [PostDetail]
     /// When set, `fetchPost(withId:)` throws it.
@@ -96,6 +91,8 @@ final class TestPostRepository: PostRepositoryProtocol {
     /// The `updatedAt` the "server" gives an updated post.
     var updateDate = Date.sampleDate.addingTimeInterval(3600)
     private(set) var updates: [(id: String, fields: PostUpdate)] = []
+    /// The `expectedVersion` of each update and delete, in order.
+    private(set) var expectedVersions: [Date?] = []
     private(set) var deletedIDs: [String] = []
     
     init(posts: [PostDetail] = [.sample]) {
@@ -110,10 +107,6 @@ final class TestPostRepository: PostRepositoryProtocol {
         return result
     }
     
-    func fetchPostNavs() async throws(APIError) -> [PostNav] {
-        posts.map(\.nav)
-    }
-    
     func fetchPost(withId id: String) async throws(APIError) -> PostDetail {
         if let fetchError { throw fetchError }
         guard let post = posts.first(where: { $0.id == id }) else { throw .notFound }
@@ -123,16 +116,23 @@ final class TestPostRepository: PostRepositoryProtocol {
     
     func createPost(_ post: PostDetail) async throws(APIError) -> PostDetail {
         await beforeWrite?()
-        guard !posts.contains(where: { $0.id == post.id }) else { throw .conflict }
+        guard !posts.contains(where: { $0.id == post.id }) else { throw .conflict(message: "Post already exists") }
         
-        posts.append(post)
-        return post
+        var stored = post
+        stored.updatedAt = nil
+        stored.readingTime = Self.readingTime(of: post.content)
+        posts.append(stored)
+        return stored
     }
     
-    func updatePost(id: String, fields: PostUpdate) async throws(APIError) -> PostDetail {
+    func updatePost(id: String, fields: PostUpdate, expectedVersion: Date?) async throws(APIError) -> PostDetail {
         await beforeWrite?()
         guard let index = posts.firstIndex(where: { $0.id == id }) else { throw .notFound }
         
+        expectedVersions.append(expectedVersion)
+        if let expectedVersion, !expectedVersion.isSameVersion(as: posts[index].version) {
+            throw .versionConflict(message: "This post was changed on the server after you opened it.")
+        }
         updates.append((id, fields))
         posts[index].title = fields.title
         posts[index].excerpt = fields.excerpt
@@ -142,14 +142,24 @@ final class TestPostRepository: PostRepositoryProtocol {
         posts[index].series = fields.series
         posts[index].createdAt = fields.createdAt ?? posts[index].createdAt
         posts[index].updatedAt = updateDate
+        posts[index].readingTime = Self.readingTime(of: fields.content)
         return posts[index]
     }
     
-    func deletePost(id: String) async throws(APIError) {
-        guard posts.contains(where: { $0.id == id }) else { throw .notFound }
+    func deletePost(id: String, expectedVersion: Date?) async throws(APIError) {
+        guard let post = posts.first(where: { $0.id == id }) else { throw .notFound }
         
+        expectedVersions.append(expectedVersion)
+        if let expectedVersion, !expectedVersion.isSameVersion(as: post.version) {
+            throw .versionConflict(message: "This post was changed on the server after you opened it.")
+        }
         posts.removeAll { $0.id == id }
         deletedIDs.append(id)
+    }
+    
+    /// The server's reading time: 200 words a minute, rounded up.
+    static func readingTime(of content: String) -> Int {
+        Int(ceil(Double(content.split(whereSeparator: \.isWhitespace).count) / 200))
     }
 }
 

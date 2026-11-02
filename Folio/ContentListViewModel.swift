@@ -26,17 +26,18 @@ class ContentListViewModel<Item: Identifiable & Equatable> where Item.ID == Stri
     var pendingDeletion: Item?
     
     @ObservationIgnored private let fetchItems: () async throws(APIError) -> [Item]
-    @ObservationIgnored private let deleteItem: (String, FolioEnvironment) async throws(APIError) -> Void
+    @ObservationIgnored private let deleteItem: ((Item, FolioEnvironment) async throws(APIError) -> Void)?
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var hasLoaded = false
     
     /// Counts loads and local changes, so a slower, older load can't replace newer items.
     @ObservationIgnored private var generation = 0
     
+    /// - Parameter delete: Deletes an item from the given environment's server. `nil` for a list whose items can't be deleted from it.
     init(
         userDefaults: UserDefaults = .standard,
         fetch: @escaping () async throws(APIError) -> [Item],
-        delete: @escaping (String, FolioEnvironment) async throws(APIError) -> Void
+        delete: ((Item, FolioEnvironment) async throws(APIError) -> Void)?
     ) {
         self.userDefaults = userDefaults
         self.fetchItems = fetch
@@ -113,17 +114,23 @@ class ContentListViewModel<Item: Identifiable & Equatable> where Item.ID == Stri
     }
     
     /// Deletes the item from the server its list was loaded from, refusing if the environment changed since.
+    ///
+    /// The delete is based on the version in the list, so an item changed on the server since the list loaded isn't deleted: the list reloads and says why, and deleting it again deletes the newer version.
     func delete(id: String) async {
+        guard let deleteItem, let item = items.first(where: { $0.id == id }) else { return }
         guard let environment = loadedEnvironment, environment == activeEnvironment else {
             error = .environmentChanged(openedFrom: loadedEnvironment ?? activeEnvironment)
             return
         }
         
         do {
-            try await deleteItem(id, environment)
+            try await deleteItem(item, environment)
             remove(id: id)
         } catch {
-            if !error.isCancellation { self.error = error }
+            guard !error.isCancellation else { return }
+            
+            self.error = error
+            if error.isVersionConflict { await refresh() }
         }
     }
     
@@ -171,10 +178,10 @@ extension ContentListViewModel where Item == PostPreview {
             fetch: { () async throws(APIError) -> [PostPreview] in
                 try await repo.fetchPosts()
             },
-            delete: { (id: String, environment: FolioEnvironment) async throws(APIError) in
-                try await repo.deletePost(id: id)
+            delete: { (post: PostPreview, environment: FolioEnvironment) async throws(APIError) in
+                try await repo.deletePost(id: post.id, expectedVersion: post.version)
                 // NOTE: - A draft left behind if this fails is harmless: it's only restored for a post with this ID, and then as a stale draft to keep or discard.
-                try? drafts.clear(key: PostEditorViewModel.draftKey(for: .edit(id: id), environment: environment))
+                try? drafts.clear(key: PostEditorViewModel.draftKey(for: .edit(id: post.id), environment: environment))
             }
         )
     }
@@ -192,11 +199,43 @@ extension ContentListViewModel where Item == ProjectPreview {
             fetch: { () async throws(APIError) -> [ProjectPreview] in
                 try await repo.fetchProjects()
             },
-            delete: { (id: String, environment: FolioEnvironment) async throws(APIError) in
-                try await repo.deleteProject(id: id)
+            delete: { (project: ProjectPreview, environment: FolioEnvironment) async throws(APIError) in
+                try await repo.deleteProject(id: project.id, expectedVersion: project.version)
                 // NOTE: - A draft left behind if this fails is harmless: it's only restored for a project with this ID, and then as a stale draft to keep or discard.
-                try? drafts.clear(key: ProjectFormViewModel.draftKey(for: .edit(id: id), environment: environment))
+                try? drafts.clear(key: ProjectFormViewModel.draftKey(for: .edit(id: project.id), environment: environment))
             }
         )
+    }
+}
+
+// MARK: - Apps
+
+typealias AppsViewModel = ContentListViewModel<AppSummary>
+
+extension ContentListViewModel where Item == AppSummary {
+    /// Apps come from the server (`GET /api/apps`), so every device and environment shows the apps that have pages there. Apps aren't deleted from the list: deleting both of an app's pages removes it.
+    convenience init(repo: any AppsRepositoryProtocol = AppsRepository(), userDefaults: UserDefaults = .standard) {
+        self.init(
+            userDefaults: userDefaults,
+            fetch: { () async throws(APIError) -> [AppSummary] in
+                try await repo.fetchApps()
+            },
+            delete: nil
+        )
+        // NOTE: - Before the server listed apps, each device kept its own list here.
+        userDefaults.removeObject(forKey: FolioStorageKey.legacyApps)
+    }
+    
+    /// Adds an app that has no pages yet, so its pages can be created. It's only in this list until the next reload, unless a page is saved.
+    /// - Returns: The app's ID, or `nil` if `id` isn't a valid app ID.
+    @discardableResult
+    func addApp(id: String) -> String? {
+        let slug = id.slugified
+        guard ContentRules.slugIssue(for: id, reservesNames: false) == nil else { return nil }
+        
+        if !items.contains(where: { $0.id == slug }) {
+            appendOrReplace(AppSummary(id: slug, appName: slug, pages: []))
+        }
+        return slug
     }
 }

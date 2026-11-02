@@ -32,15 +32,20 @@ struct URLProcessor {
         return try await perform(request)
     }
     
-    func put(_ url: URL, body: Data) async throws(APIError) -> Data {
+    /// - Parameter expectedVersion: The version of the item the edit started from (its `updatedAt`, or `createdAt` if it was never updated). The server refuses the save with `APIError.versionConflict` if the item changed since. `nil` saves unconditionally.
+    func put(_ url: URL, body: Data, expectedVersion: Date? = nil) async throws(APIError) -> Data {
         var request = authorized(url: url, method: .put)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setExpectedVersion(expectedVersion)
         request.httpBody = body
         return try await perform(request)
     }
     
-    func delete(_ url: URL) async throws(APIError) {
-        _ = try await perform(authorized(url: url, method: .delete))
+    /// - Parameter expectedVersion: Like `put`'s: the server refuses the delete if the item changed since that version.
+    func delete(_ url: URL, expectedVersion: Date? = nil) async throws(APIError) {
+        var request = authorized(url: url, method: .delete)
+        request.setExpectedVersion(expectedVersion)
+        _ = try await perform(request)
     }
     
     func upload(to url: URL, fileData: Data, fileName: String, mimeType: String, context: String, id: String, overwrite: Bool = false) async throws(APIError) -> Data {
@@ -132,9 +137,18 @@ struct URLProcessor {
         case 200..<300: return data
         case 401: throw .unauthorized
         case 404: throw .notFound
-        case 409: throw .conflict
+        case 409: throw Self.conflictError(in: data)
         default: throw .httpError(statusCode: http.statusCode, message: Self.serverMessage(in: data))
         }
+    }
+    
+    /// Tells the kinds of 409 apart by the fields the server adds: `current` when an item changed since the version sent, `usedBy` when a media file is in use.
+    static func conflictError(in data: Data) -> APIError {
+        let message = serverMessage(in: data)
+        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        if body?["current"] != nil { return .versionConflict(message: message) }
+        if body?["usedBy"] != nil { return .inUse(message: message) }
+        return .conflict(message: message)
     }
     
     /// The `error` text of a JSON error response (`{ "error": "tagline can't be empty" }`), shortened if it's very long. `nil` when the body isn't one.

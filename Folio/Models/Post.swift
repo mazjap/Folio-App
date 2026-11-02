@@ -45,15 +45,15 @@ extension PostDetail {
         PostPreview(id: id, title: title, excerpt: excerpt, heroImage: heroImage, tags: tags, createdAt: createdAt, updatedAt: updatedAt, readingTime: readingTime, series: series)
     }
     
-    var nav: PostNav {
-        PostNav(id: id, title: title, tags: tags, createdAt: createdAt, series: series)
+    /// The version the server compares a conditional save or delete with: when it was last updated, or created if it never was.
+    var version: Date {
+        updatedAt ?? createdAt
     }
 }
 
-struct PostNav: Codable, Equatable {
-  var id: String
-  var title: String
-  var tags: [String]
-  var createdAt: Date
-  var series: String?
+extension PostPreview {
+    /// Like `PostDetail.version`.
+    var version: Date {
+        updatedAt ?? createdAt
+    }
 }

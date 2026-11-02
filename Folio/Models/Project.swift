@@ -57,13 +57,15 @@ extension ProjectDetail {
         ProjectPreview(id: id, title: title, tagline: tagline, heroImage: heroImage, category: category, status: status, featured: featured, createdAt: createdAt, updatedAt: updatedAt)
     }
     
-    var nav: ProjectNav {
-        ProjectNav(id: id, title: title, status: status)
+    /// The version the server compares a conditional save or delete with: when it was last updated, or created if it never was.
+    var version: Date {
+        updatedAt ?? createdAt
     }
 }
 
-struct ProjectNav: Codable, Equatable {
-    var id: String
-    var title: String
-    var status: ProjectStatus
+extension ProjectPreview {
+    /// Like `ProjectDetail.version`.
+    var version: Date {
+        updatedAt ?? createdAt
+    }
 }

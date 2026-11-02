@@ -100,6 +100,7 @@ struct AppPrivacyPolicyEditorView: View {
             }
         }
         .errorAlert($vm.error)
+        .staleDraftAlert(isPresented: $vm.isDraftStale, itemKind: "privacy policy", onKeep: vm.keepStaleDraft, onDiscard: vm.discardDraft)
         .confirmationDialog("Delete privacy policy?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete Privacy Policy", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}

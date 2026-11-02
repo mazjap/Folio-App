@@ -250,4 +250,14 @@ struct HelperTests {
         #expect(mediaRepo.deletedFiles == ["/media/posts/a/removed.webp"])
         #expect(result.failed.isEmpty)
     }
+    
+    /// The server refuses to delete a file other content uses; that's not a failed cleanup to retry on every save.
+    @Test func filesUsedElsewhereAreLeftAlone() async {
+        let mediaRepo = TestMediaRepository()
+        mediaRepo.deleteError = .inUse(message: "This file is still used by post \"b\".")
+        let result = await mediaRepo.deleteUnusedFiles(previous: ["/media/posts/a/shared.webp"], current: [], text: "", context: .posts, id: "a")
+        
+        #expect(result.failed.isEmpty)
+        #expect(result.error == nil)
+    }
 }

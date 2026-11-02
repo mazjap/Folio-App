@@ -8,7 +8,8 @@ nonisolated enum FolioStorageKey {
     static let prodBaseURL = "folio.prod.baseURL"
     static let devApiKey = "folio.dev.apiKey"
     static let prodApiKey = "folio.prod.apiKey"
-    static let apps = "folio.apps"
+    /// Where each device kept its own app list before the server listed apps. Deleted when the Apps list loads.
+    static let legacyApps = "folio.apps"
 }
 
 // MARK: - Environment

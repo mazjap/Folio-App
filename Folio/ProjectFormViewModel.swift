@@ -62,6 +62,8 @@ class ProjectFormViewModel {
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var isPopulating = false
     @ObservationIgnored private var serverUpdatedAt: Date?
+    /// The `version` of the project the editor loaded, sent with saves and deletes so the server refuses them if the project changed since.
+    @ObservationIgnored private var serverVersion: Date?
     @ObservationIgnored private var serverHeroImage = ""
     @ObservationIgnored private var serverMedia: [MediaItem] = []
     
@@ -80,7 +82,7 @@ class ProjectFormViewModel {
         self.mediaRepo = mediaRepo
         self.userDefaults = userDefaults
         self.environment = environment
-        self.draftSession = DraftSession(key: Self.draftKey(for: mode, environment: environment), legacyKey: Self.legacyDraftKey(for: mode), store: drafts)
+        self.draftSession = DraftSession(key: Self.draftKey(for: mode, environment: environment), legacyKey: Self.legacyDraftKey(for: mode), store: drafts, claimsNewDraftSlot: mode == .create)
         draftSession.onError = { [weak self] error in self?.error = error }
     }
     
@@ -143,7 +145,7 @@ class ProjectFormViewModel {
         draftSession.isLegacy
     }
     
-    /// The draft key, namespaced by environment so Development and Production drafts of the same project stay apart. New projects use `new-project`, which no project ID can collide with.
+    /// The draft key, namespaced by environment so Development and Production drafts of the same project stay apart. New projects use `new-project`, which no project ID can collide with (the editor may add `-2`, `-3`, … when several are open; see `NewDraftSlots`).
     static func draftKey(for mode: Mode, environment: FolioEnvironment) -> String {
         switch mode {
         case .create: "\(environment.rawValue).new-project"
@@ -259,7 +261,7 @@ class ProjectFormViewModel {
             case .create:
                 result = try await repo.createProject(buildDetail())
             case let .edit(id):
-                result = try await repo.updateProject(id: id, fields: buildUpdate())
+                result = try await repo.updateProject(id: id, fields: buildUpdate(), expectedVersion: serverVersion)
             }
             
             // Anything changed while the project was saving is kept as a draft over what was saved.
@@ -296,7 +298,11 @@ class ProjectFormViewModel {
                 error = APIError.cleanupFailed(count: cleanup.failed.count, underlying: cleanupError.localizedDescription)
             }
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -308,11 +314,15 @@ class ProjectFormViewModel {
         
         do {
             try checkEnvironment()
-            try await repo.deleteProject(id: id)
+            try await repo.deleteProject(id: id, expectedVersion: serverVersion)
             draftSession.discard()
             deleted = true
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -392,6 +402,13 @@ class ProjectFormViewModel {
         draftSession.scheduleSave(currentDraft)
     }
     
+    /// The project changed on the server after the editor loaded it, so a save or delete was refused. Keeps the edits as a draft and loads the current version, which restores the draft over it and asks whether to keep it (`isDraftStale`), with Highlight Changed Lines comparing against the new version. If there were no edits to keep, says what happened instead.
+    private func reloadAfterConflict(_ conflict: APIError) async {
+        draftSession.save(currentDraft)
+        await load()
+        if loadState == .loaded, !isDraftStale { error = conflict }
+    }
+    
     /// Throws if the environment changed since the editor opened, before anything is sent to the server.
     private func checkEnvironment() throws(APIError) {
         guard ServerSettings(userDefaults: userDefaults).activeEnvironment == environment else {
@@ -441,6 +458,7 @@ class ProjectFormViewModel {
         
         serverDescription = detail.description
         serverUpdatedAt = detail.updatedAt
+        serverVersion = detail.version
         serverHeroImage = detail.heroImage
         serverMedia = detail.media
         id = detail.id

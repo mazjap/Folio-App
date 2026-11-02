@@ -12,10 +12,9 @@ final class FolioUITestsLaunchTests: XCTestCase {
     @MainActor
     func testLaunch() throws {
         let app = XCUIApplication()
+        // NOTE: - Sample content, so the screenshot doesn't depend on (or reach) a server.
+        app.launchArguments = ["-ui-testing"]
         app.launch()
-        
-        // Insert steps here to perform after app launch but before taking a screenshot,
-        // such as logging into a test account or navigating somewhere in the app
         
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "Launch Screen"

@@ -93,6 +93,7 @@ struct AppSupportEditorView: View {
             }
         }
         .errorAlert($vm.error)
+        .staleDraftAlert(isPresented: $vm.isDraftStale, itemKind: "support page", onKeep: vm.keepStaleDraft, onDiscard: vm.discardDraft)
         .confirmationDialog("Delete support page?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete Support Page", role: .destructive) { Task { await vm.delete() } }
             Button("Cancel", role: .cancel) {}

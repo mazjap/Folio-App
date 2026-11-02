@@ -3,7 +3,12 @@ import Foundation
 enum APIError: Error, LocalizedError {
     case unauthorized
     case notFound
-    case conflict
+    /// A 409 the cases below don't cover, like creating an item whose ID is taken or uploading over an existing file, with the server's explanation.
+    case conflict(message: String?)
+    /// The item changed on the server after the editor loaded it (the server compared the `X-Expected-Version` sent), so the save or delete was refused.
+    case versionConflict(message: String?)
+    /// A media file can't be deleted because other content still uses it.
+    case inUse(message: String?)
     /// Any other unsuccessful status, with the server's explanation (its `error` field) when it sent one.
     case httpError(statusCode: Int, message: String?)
     case encodingFailed(any Error)
@@ -20,6 +25,14 @@ enum APIError: Error, LocalizedError {
         if case .notFound = self { true } else { false }
     }
     
+    var isVersionConflict: Bool {
+        if case .versionConflict = self { true } else { false }
+    }
+    
+    var isInUse: Bool {
+        if case .inUse = self { true } else { false }
+    }
+    
     var isCancellation: Bool {
         guard case let .networkFailed(e) = self else { return false }
         return (e as? URLError)?.code == .cancelled
@@ -31,8 +44,12 @@ enum APIError: Error, LocalizedError {
             return "Unauthorized — check your API key in Settings."
         case .notFound:
             return "The requested resource was not found."
-        case .conflict:
-            return "A resource with that ID already exists."
+        case let .conflict(message):
+            return message ?? "Something with that ID already exists."
+        case let .versionConflict(message):
+            return message ?? "This was changed on the server after you opened it."
+        case let .inUse(message):
+            return message ?? "This file is still used by other content."
         case let .httpError(code, message):
             return message ?? "Server error (\(code))."
         case let .encodingFailed(e):

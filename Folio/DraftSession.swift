@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Nothing is saved until the editor sets a baseline (the fields as loaded from the server, or empty for a new item), so a failed or cancelled load never saves empty fields. A draft that matches the baseline is deleted rather than saved, so opening an item and leaving doesn't leave a copy behind that would later hide newer changes on the server.
 @Observable
-final class DraftSession<Draft: EditorDraft> {
+final class DraftSession<Draft: EditorDraft>: DraftKeyed {
     /// Whether a draft with unpublished changes is saved for this item.
     private(set) var hasDraft = false
     
@@ -27,17 +27,23 @@ final class DraftSession<Draft: EditorDraft> {
     @ObservationIgnored private(set) var baseline: Draft?
     
     /// Where the draft was saved before drafts were kept apart by environment. Restored once, then moved to `key`.
-    @ObservationIgnored private let legacyKey: String?
+    @ObservationIgnored private var legacyKey: String?
     
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
     @ObservationIgnored private let store: DraftStore
     @ObservationIgnored private let autosaveDelay: Duration
     
-    init(key: String, legacyKey: String? = nil, store: DraftStore = .live, autosaveDelay: Duration = .seconds(2)) {
+    /// - Parameter claimsNewDraftSlot: For a new item's editor: `key` is the first of a series of keys (`dev.new-post`, `dev.new-post-2`, …), and the session takes one no other open editor has (see `NewDraftSlots`).
+    init(key: String, legacyKey: String? = nil, store: DraftStore = .live, autosaveDelay: Duration = .seconds(2), claimsNewDraftSlot: Bool = false) {
         self.key = key
         self.legacyKey = legacyKey
         self.store = store
         self.autosaveDelay = autosaveDelay
+        if claimsNewDraftSlot {
+            self.key = NewDraftSlots.claim(base: key, in: store, for: self)
+            // NOTE: - A draft from before environments were separate belongs to the first slot only.
+            if self.key != key { self.legacyKey = nil }
+        }
     }
     
     // MARK: - Functions
@@ -148,5 +154,47 @@ final class DraftSession<Draft: EditorDraft> {
     private func report(_ error: DraftStore.DraftError) {
         if case .couldNotSave = error { isFailing = true }
         onError?(error)
+    }
+}
+
+// MARK: - New-item draft slots
+
+/// Something that saves a draft under a key that can change, like a `DraftSession`.
+protocol DraftKeyed: AnyObject {
+    var key: String { get }
+}
+
+/// Which new-item drafts are open in an editor, so two windows creating posts at once each keep their own draft instead of overwriting one.
+///
+/// The first new post's draft is `dev.new-post`; while that's open, the next new post uses `dev.new-post-2`, and so on. A new editor restores the first saved draft that no other editor has open, so every draft is reached in turn, and otherwise starts in the first free slot. A slot is open while its session exists and still uses that key (a new item's key changes when it's first saved).
+enum NewDraftSlots {
+    private final class Claim {
+        weak var owner: (any DraftKeyed)?
+        
+        init(_ owner: any DraftKeyed) {
+            self.owner = owner
+        }
+    }
+    
+    private static var claims: [String: Claim] = [:]
+    private static let maxSlots = 50
+    
+    // MARK: - Functions
+    
+    /// The key `owner` should save under: `base`, or `base-2`, `base-3`, ….
+    static func claim(base: String, in store: DraftStore, for owner: any DraftKeyed) -> String {
+        // NOTE: - Claims are per store, so tests with their own temporary stores don't see each other's editors.
+        func claimID(_ key: String) -> String {
+            store.directory.path(percentEncoded: false) + "|" + key
+        }
+        
+        func isOpen(_ key: String) -> Bool {
+            claims[claimID(key)]?.owner?.key == key
+        }
+        
+        let free = (1...maxSlots).map { $0 == 1 ? base : "\(base)-\($0)" }.filter { !isOpen($0) }
+        let key = free.first(where: { store.contains(key: $0) }) ?? free.first ?? base
+        claims[claimID(key)] = Claim(owner)
+        return key
     }
 }

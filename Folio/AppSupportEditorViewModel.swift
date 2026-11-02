@@ -30,6 +30,8 @@ class AppSupportEditorViewModel {
     @ObservationIgnored private let repo: any AppsRepositoryProtocol
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var isPopulating = false
+    /// The server's `updatedAt` for the version being edited: sent with saves and deletes so the server can refuse them if the page changed since, and recorded in drafts.
+    @ObservationIgnored private var serverUpdatedAt: Date?
     
     // MARK: - Init
     
@@ -66,12 +68,18 @@ class AppSupportEditorViewModel {
         draftSession.hasDraft
     }
     
+    /// Whether the restored draft was started from an older version of the page than the server's. Cleared once the user decides what to do with it.
+    var isDraftStale: Bool {
+        get { draftSession.isStale }
+        set { draftSession.isStale = newValue }
+    }
+    
     static func draftKey(appId: String, environment: FolioEnvironment) -> String {
         "\(environment.rawValue).app-\(appId)-support"
     }
     
     private var currentDraft: AppSupportDraft {
-        AppSupportDraft(appName: appName, version: version, subtitle: subtitle, content: content, contactUrl: contactUrl, contactText: contactText, serverUpdatedAt: nil, savedAt: .now)
+        AppSupportDraft(appName: appName, version: version, subtitle: subtitle, content: content, contactUrl: contactUrl, contactText: contactText, serverUpdatedAt: serverUpdatedAt, savedAt: .now)
     }
     
     // MARK: - Actions
@@ -93,7 +101,7 @@ class AppSupportEditorViewModel {
         do {
             try checkEnvironment()
             let result = if isEditing {
-                try await repo.updateSupport(appId: appId, fields: buildUpdate())
+                try await repo.updateSupport(appId: appId, fields: buildUpdate(), expectedVersion: serverUpdatedAt)
             } else {
                 try await repo.createSupport(buildSupport())
             }
@@ -103,7 +111,11 @@ class AppSupportEditorViewModel {
             draftSession.setBaseline(currentDraft)
             saved = result
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -115,11 +127,15 @@ class AppSupportEditorViewModel {
         
         do {
             try checkEnvironment()
-            try await repo.deleteSupport(appId: appId)
+            try await repo.deleteSupport(appId: appId, expectedVersion: serverUpdatedAt)
             draftSession.discard()
             deleted = true
         } catch {
-            if !error.isCancellation { self.error = error }
+            if error.isVersionConflict {
+                await reloadAfterConflict(error)
+            } else if !error.isCancellation {
+                self.error = error
+            }
         }
     }
     
@@ -127,6 +143,12 @@ class AppSupportEditorViewModel {
     func discardDraft() {
         draftSession.discard()
         if let baseline = draftSession.baseline { populate(fromDraft: baseline) }
+    }
+    
+    /// Keeps a draft that was started from an older version of the page.
+    func keepStaleDraft() {
+        draftSession.isStale = false
+        draftSession.save(currentDraft)
     }
     
     /// Saves the draft now, when the editor closes or the app goes to the background.
@@ -144,6 +166,20 @@ class AppSupportEditorViewModel {
         draftSession.scheduleSave(currentDraft)
     }
     
+    /// The page changed on the server after the editor opened, so a save or delete was refused. Keeps the edits as a draft and loads the current version as the new baseline, which asks whether to keep the draft over it (`isDraftStale`). If there were no edits to keep, says what happened instead.
+    private func reloadAfterConflict(_ conflict: APIError) async {
+        draftSession.save(currentDraft)
+        do {
+            let current = try await repo.fetchSupport(appId: appId)
+            populate(from: current)
+            draftSession.setBaseline(currentDraft)
+            if let draft = draftSession.restore() { populate(fromDraft: draft) }
+            if !isDraftStale { error = conflict }
+        } catch {
+            if !error.isCancellation { self.error = error }
+        }
+    }
+    
     private func checkEnvironment() throws(APIError) {
         guard ServerSettings(userDefaults: userDefaults).activeEnvironment == environment else {
             throw .environmentChanged(openedFrom: environment)
@@ -154,6 +190,7 @@ class AppSupportEditorViewModel {
         isPopulating = true
         defer { isPopulating = false }
         
+        serverUpdatedAt = support.updatedAt
         appName = support.appName
         version = support.version
         subtitle = support.subtitle
